@@ -1,0 +1,4 @@
+mcp>=1.0.0
+Mastodon.py>=2.0.0
+atproto>=0.0.50
+python-dotenv>=1.0.0

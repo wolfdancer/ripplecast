@@ -1,0 +1,32 @@
+[
+  {
+    "uri": "at://did:plc:testuser123/app.bsky.feed.post/3abc123def",
+    "cid": "bafyreiabc123",
+    "author": {
+      "did": "did:plc:testuser123",
+      "handle": "testuser.bsky.social",
+      "displayName": "Test User"
+    },
+    "record": {
+      "text": "Hello world! This is my first cross-posted test.",
+      "createdAt": "2025-01-25T10:05:00.000Z",
+      "langs": ["en"]
+    },
+    "indexedAt": "2025-01-25T10:05:01.000Z"
+  },
+  {
+    "uri": "at://did:plc:testuser123/app.bsky.feed.post/3abc123ghi",
+    "cid": "bafyreighi456",
+    "author": {
+      "did": "did:plc:testuser123",
+      "handle": "testuser.bsky.social",
+      "displayName": "Test User"
+    },
+    "record": {
+      "text": "Unique Bluesky post not on Mastodon",
+      "createdAt": "2025-01-24T12:00:00.000Z",
+      "langs": ["en"]
+    },
+    "indexedAt": "2025-01-24T12:00:01.000Z"
+  }
+]

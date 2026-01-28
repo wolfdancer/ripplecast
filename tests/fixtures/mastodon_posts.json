@@ -1,0 +1,32 @@
+[
+  {
+    "id": "111222333444555666",
+    "created_at": "2025-01-25T10:00:00.000Z",
+    "content": "<p>Hello world! This is my first cross-posted test.</p>",
+    "url": "https://mastodon.social/@testuser/111222333444555666",
+    "reblog": null,
+    "in_reply_to_id": null,
+    "language": "en",
+    "media_attachments": []
+  },
+  {
+    "id": "111222333444555667",
+    "created_at": "2025-01-24T15:30:00.000Z",
+    "content": "<p>Check out this great article! <a href=\"https://example.com/article\">https://example.com/article</a></p>",
+    "url": "https://mastodon.social/@testuser/111222333444555667",
+    "reblog": null,
+    "in_reply_to_id": null,
+    "language": "en",
+    "media_attachments": []
+  },
+  {
+    "id": "111222333444555668",
+    "created_at": "2025-01-23T09:00:00.000Z",
+    "content": "<p>Morning thoughts on software development...</p>",
+    "url": "https://mastodon.social/@testuser/111222333444555668",
+    "reblog": null,
+    "in_reply_to_id": null,
+    "language": "en",
+    "media_attachments": []
+  }
+]

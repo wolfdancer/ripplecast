@@ -1,0 +1,263 @@
+"""Bluesky platform plugin."""
+
+import logging
+from datetime import datetime
+from typing import Any
+
+from atproto import Client
+from atproto.exceptions import AtProtocolError, UnauthorizedError
+
+from ripplecast.config import BlueskyConfig
+from ripplecast.models import (
+    AuthenticationError,
+    MediaAttachment,
+    Post,
+    PostNotFoundError,
+    PostTooLongError,
+    RateLimitError,
+)
+from ripplecast.platforms.base import PlatformPlugin
+
+logger = logging.getLogger(__name__)
+
+
+class BlueskyPlugin(PlatformPlugin):
+    """Bluesky platform implementation."""
+
+    def __init__(self, config: BlueskyConfig):
+        self._config = config
+        self._client: Client | None = None
+        self._connected = False
+
+    @property
+    def platform_name(self) -> str:
+        return "bluesky"
+
+    @property
+    def display_name(self) -> str:
+        return "Bluesky"
+
+    @property
+    def max_post_length(self) -> int:
+        return 300
+
+    @property
+    def connected(self) -> bool:
+        return self._connected
+
+    async def authenticate(self) -> bool:
+        """Authenticate with Bluesky using the configured app password."""
+        if not self._config.is_configured:
+            logger.warning("Bluesky credentials not configured")
+            return False
+
+        try:
+            self._client = Client()
+            self._client.login(self._config.handle, self._config.app_password)
+            self._connected = True
+            logger.info(f"Authenticated as {self._config.handle}")
+            return True
+        except UnauthorizedError:
+            logger.error("Bluesky authentication failed: Invalid credentials")
+            self._connected = False
+            return False
+        except Exception as e:
+            logger.error(f"Bluesky authentication failed: {e}")
+            self._connected = False
+            return False
+
+    async def get_current_user(self) -> dict[str, Any]:
+        """Get the authenticated user's profile information."""
+        if not self._connected or not self._client:
+            raise AuthenticationError("Not authenticated with Bluesky")
+
+        profile = self._client.get_profile(actor=self._client.me.did)
+
+        return {
+            "id": self._client.me.did,
+            "username": profile.handle,
+            "display_name": profile.display_name or profile.handle,
+            "url": f"https://bsky.app/profile/{profile.handle}",
+        }
+
+    async def get_posts(
+        self,
+        limit: int = 20,
+        since_id: str | None = None,
+        max_id: str | None = None,
+        exclude_replies: bool = True,
+        exclude_reposts: bool = True,
+    ) -> list[Post]:
+        """Fetch recent posts from the authenticated user."""
+        if not self._connected or not self._client:
+            raise AuthenticationError("Not authenticated with Bluesky")
+
+        try:
+            response = self._client.get_author_feed(
+                actor=self._client.me.did,
+                limit=min(limit, 100),
+                cursor=max_id,
+            )
+
+            posts = []
+            for feed_item in response.feed:
+                post = feed_item.post
+                reason = feed_item.reason
+
+                # Check if this is a repost
+                is_repost = reason is not None and hasattr(reason, "py_type")
+
+                # Skip reposts if requested
+                if exclude_reposts and is_repost:
+                    continue
+
+                # Skip replies if requested
+                if exclude_replies and post.record.reply is not None:
+                    continue
+
+                # Skip if we've passed the since_id
+                if since_id and post.uri == since_id:
+                    break
+
+                converted_post = self._feed_post_to_post(post, is_repost)
+                posts.append(converted_post)
+
+            return posts
+
+        except AtProtocolError as e:
+            if "rate" in str(e).lower():
+                raise RateLimitError("bluesky")
+            raise
+
+    async def create_post(
+        self,
+        text: str,
+        media: list[MediaAttachment] | None = None,
+        reply_to_id: str | None = None,
+        language: str | None = None,
+    ) -> Post:
+        """Create a new post on Bluesky."""
+        if not self._connected or not self._client:
+            raise AuthenticationError("Not authenticated with Bluesky")
+
+        # Validate content
+        is_valid, error = self.validate_post_content(text)
+        if not is_valid:
+            raise PostTooLongError(text, self.max_post_length, "bluesky")
+
+        try:
+            # Note: Media upload and replies not implemented in v1
+            response = self._client.send_post(text=text)
+
+            # Fetch the created post to return full details
+            # The response contains the URI and CID of the new post
+            return Post(
+                id=response.uri,
+                platform="bluesky",
+                text=text,
+                created_at=datetime.now(),
+                url=self._uri_to_url(response.uri),
+                raw_data={"uri": response.uri, "cid": response.cid},
+            )
+
+        except AtProtocolError as e:
+            if "rate" in str(e).lower():
+                raise RateLimitError("bluesky")
+            raise
+
+    async def delete_post(self, post_id: str) -> bool:
+        """Delete a post by ID (URI)."""
+        if not self._connected or not self._client:
+            raise AuthenticationError("Not authenticated with Bluesky")
+
+        try:
+            self._client.delete_post(post_id)
+            return True
+        except AtProtocolError:
+            return False
+
+    async def get_post_by_id(self, post_id: str) -> Post | None:
+        """Fetch a specific post by ID (URI)."""
+        if not self._connected or not self._client:
+            raise AuthenticationError("Not authenticated with Bluesky")
+
+        try:
+            # Parse the URI to get repo and rkey
+            # URI format: at://did:plc:xxx/app.bsky.feed.post/xxx
+            parts = post_id.replace("at://", "").split("/")
+            if len(parts) < 3:
+                raise PostNotFoundError(f"Invalid post URI: {post_id}")
+
+            repo = parts[0]
+            rkey = parts[2]
+
+            response = self._client.get_post(rkey, repo)
+
+            return Post(
+                id=response.uri,
+                platform="bluesky",
+                text=response.value.text,
+                created_at=datetime.fromisoformat(
+                    response.value.created_at.replace("Z", "+00:00")
+                ),
+                url=self._uri_to_url(response.uri),
+                raw_data={"uri": response.uri, "cid": response.cid},
+            )
+
+        except AtProtocolError:
+            raise PostNotFoundError(f"Post {post_id} not found on Bluesky")
+
+    def _feed_post_to_post(self, post: Any, is_repost: bool = False) -> Post:
+        """Convert a Bluesky feed post to our Post model."""
+        # Parse media attachments if present
+        media_attachments = []
+        if hasattr(post.record, "embed") and post.record.embed:
+            embed = post.record.embed
+            if hasattr(embed, "images"):
+                for img in embed.images:
+                    media_attachments.append(
+                        MediaAttachment(
+                            url=img.fullsize if hasattr(img, "fullsize") else "",
+                            media_type="image",
+                            alt_text=img.alt if hasattr(img, "alt") else None,
+                        )
+                    )
+
+        # Parse created_at
+        created_at = post.record.created_at
+        if isinstance(created_at, str):
+            created_at = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+
+        # Check if reply
+        reply_to_id = None
+        if hasattr(post.record, "reply") and post.record.reply:
+            reply_to_id = post.record.reply.parent.uri
+
+        return Post(
+            id=post.uri,
+            platform="bluesky",
+            text=post.record.text,
+            created_at=created_at,
+            url=self._uri_to_url(post.uri),
+            media_attachments=media_attachments,
+            reply_to_id=reply_to_id,
+            is_repost=is_repost,
+            language=post.record.langs[0] if hasattr(post.record, "langs") and post.record.langs else None,
+            raw_data={"uri": post.uri, "cid": post.cid},
+        )
+
+    def _uri_to_url(self, uri: str) -> str:
+        """Convert an AT Protocol URI to a bsky.app URL."""
+        # URI format: at://did:plc:xxx/app.bsky.feed.post/rkey
+        # URL format: https://bsky.app/profile/handle/post/rkey
+        try:
+            parts = uri.replace("at://", "").split("/")
+            did = parts[0]
+            rkey = parts[2] if len(parts) > 2 else ""
+
+            # Get handle from DID (we might need to resolve this)
+            handle = self._config.handle
+
+            return f"https://bsky.app/profile/{handle}/post/{rkey}"
+        except Exception:
+            return uri

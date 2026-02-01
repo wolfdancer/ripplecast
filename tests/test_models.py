@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import pytest
 
 from ripplecast.models import (
+    LinkEmbed,
     MediaAttachment,
     Post,
     PostMatch,
@@ -71,6 +72,82 @@ class TestPost:
         assert len(post.media_attachments) == 1
         assert post.to_dict()["has_media"] is True
         assert post.to_dict()["media_count"] == 1
+
+    def test_post_with_link_embed(self):
+        """Test post with link embed."""
+        link_embed = LinkEmbed(
+            url="https://example.com/article",
+            title="Example Article",
+            description="An interesting article",
+            thumbnail_url="https://example.com/thumb.jpg",
+        )
+        post = Post(
+            id="123",
+            platform="bluesky",
+            text="Check this article!",
+            created_at=datetime.now(timezone.utc),
+            url="https://bsky.app/post/123",
+            link_embed=link_embed,
+        )
+
+        assert post.link_embed is not None
+        assert post.link_embed.url == "https://example.com/article"
+        result = post.to_dict()
+        assert result["has_link_embed"] is True
+        assert result["link_embed"]["url"] == "https://example.com/article"
+        assert result["link_embed"]["title"] == "Example Article"
+
+    def test_post_without_link_embed(self):
+        """Test that post without link embed has correct dict."""
+        post = Post(
+            id="123",
+            platform="mastodon",
+            text="Simple text post",
+            created_at=datetime.now(timezone.utc),
+            url="https://example.com/123",
+        )
+
+        result = post.to_dict()
+        assert result["has_link_embed"] is False
+        assert "link_embed" not in result
+
+
+class TestLinkEmbed:
+    """Tests for the LinkEmbed model."""
+
+    def test_link_embed_creation(self):
+        """Test creating a link embed."""
+        embed = LinkEmbed(
+            url="https://example.com/page",
+            title="Page Title",
+            description="Page description",
+            thumbnail_url="https://example.com/image.jpg",
+        )
+
+        assert embed.url == "https://example.com/page"
+        assert embed.title == "Page Title"
+        assert embed.description == "Page description"
+        assert embed.thumbnail_url == "https://example.com/image.jpg"
+        assert embed.thumbnail_data is None
+
+    def test_link_embed_minimal(self):
+        """Test creating a link embed with only URL."""
+        embed = LinkEmbed(url="https://example.com")
+
+        assert embed.url == "https://example.com"
+        assert embed.title is None
+        assert embed.description is None
+        assert embed.thumbnail_url is None
+
+    def test_link_embed_with_thumbnail_data(self):
+        """Test link embed with binary thumbnail data."""
+        embed = LinkEmbed(
+            url="https://example.com",
+            title="Test",
+            thumbnail_data=b"fake image data",
+        )
+
+        assert embed.thumbnail_data == b"fake image data"
 
 
 class TestPostMatch:

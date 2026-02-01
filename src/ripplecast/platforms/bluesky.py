@@ -2,14 +2,18 @@
 
 import logging
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from atproto import Client
+from atproto import Client, models
 from atproto.exceptions import AtProtocolError, UnauthorizedError
 
 from ripplecast.config import BlueskyConfig
+
+if TYPE_CHECKING:
+    from ripplecast.media import DownloadedMedia
 from ripplecast.models import (
     AuthenticationError,
+    LinkEmbed,
     MediaAttachment,
     Post,
     PostNotFoundError,
@@ -23,6 +27,56 @@ logger = logging.getLogger(__name__)
 
 class BlueskyPlugin(PlatformPlugin):
     """Bluesky platform implementation."""
+
+    @staticmethod
+    def _expand_facets_in_text(text: str, facets: list[Any] | None) -> str:
+        """Expand truncated URLs in text using facet metadata.
+
+        Bluesky stores full URLs in facets while displaying truncated versions.
+        This method reconstructs the text with full URLs for cross-posting.
+
+        Args:
+            text: The original post text (may contain truncated URLs)
+            facets: List of facet objects with byte indices and features
+
+        Returns:
+            Text with truncated URLs replaced by their full versions
+        """
+        if not facets:
+            return text
+
+        # Convert text to bytes for proper offset handling
+        text_bytes = text.encode("utf-8")
+
+        # Collect all link facets with their byte ranges and URIs
+        replacements = []
+        for facet in facets:
+            if not hasattr(facet, "index") or not hasattr(facet, "features"):
+                continue
+
+            byte_start = facet.index.byte_start
+            byte_end = facet.index.byte_end
+
+            # Find link features in this facet
+            for feature in facet.features:
+                # Check for link type facet
+                if hasattr(feature, "uri"):
+                    uri = feature.uri
+                    replacements.append((byte_start, byte_end, uri))
+                    break  # Only one replacement per facet
+
+        if not replacements:
+            return text
+
+        # Sort replacements by byte_start in reverse order to avoid offset issues
+        replacements.sort(key=lambda x: x[0], reverse=True)
+
+        # Apply replacements from end to start
+        result_bytes = text_bytes
+        for byte_start, byte_end, uri in replacements:
+            result_bytes = result_bytes[:byte_start] + uri.encode("utf-8") + result_bytes[byte_end:]
+
+        return result_bytes.decode("utf-8")
 
     def __init__(self, config: BlueskyConfig):
         self._config = config
@@ -135,6 +189,8 @@ class BlueskyPlugin(PlatformPlugin):
         media: list[MediaAttachment] | None = None,
         reply_to_id: str | None = None,
         language: str | None = None,
+        link_embed: LinkEmbed | None = None,
+        downloaded_media: list["DownloadedMedia"] | None = None,
     ) -> Post:
         """Create a new post on Bluesky."""
         if not self._connected or not self._client:
@@ -146,11 +202,39 @@ class BlueskyPlugin(PlatformPlugin):
             raise PostTooLongError(text, self.max_post_length, "bluesky")
 
         try:
-            # Note: Media upload and replies not implemented in v1
-            response = self._client.send_post(text=text)
+            embed = None
 
-            # Fetch the created post to return full details
-            # The response contains the URI and CID of the new post
+            # Handle image embeds (takes priority over link embeds)
+            if downloaded_media:
+                images = []
+                for dm in downloaded_media[:4]:  # Bluesky max 4 images
+                    if dm.is_image:
+                        blob_response = self._client.upload_blob(dm.data)
+                        images.append(
+                            models.AppBskyEmbedImages.Image(
+                                image=blob_response.blob,
+                                alt=dm.alt_text or "",
+                            )
+                        )
+                if images:
+                    embed = models.AppBskyEmbedImages.Main(images=images)
+
+            # Handle external link embed (only if no media embed)
+            elif link_embed:
+                external = models.AppBskyEmbedExternal.External(
+                    uri=link_embed.url,
+                    title=link_embed.title or "",
+                    description=link_embed.description or "",
+                )
+                # Add thumbnail if available
+                if link_embed.thumbnail_data:
+                    thumb_response = self._client.upload_blob(link_embed.thumbnail_data)
+                    external.thumb = thumb_response.blob
+                embed = models.AppBskyEmbedExternal.Main(external=external)
+
+            response = self._client.send_post(text=text, embed=embed)
+
+            # Return the created post
             return Post(
                 id=response.uri,
                 platform="bluesky",
@@ -193,14 +277,43 @@ class BlueskyPlugin(PlatformPlugin):
 
             response = self._client.get_post(rkey, repo)
 
+            # Parse media attachments and link embeds
+            media_attachments = []
+            link_embed = None
+            if hasattr(response.value, "embed") and response.value.embed:
+                embed = response.value.embed
+                if hasattr(embed, "images"):
+                    for img in embed.images:
+                        media_attachments.append(
+                            MediaAttachment(
+                                url=img.fullsize if hasattr(img, "fullsize") else "",
+                                media_type="image",
+                                alt_text=img.alt if hasattr(img, "alt") else None,
+                            )
+                        )
+                if hasattr(embed, "external"):
+                    ext = embed.external
+                    link_embed = LinkEmbed(
+                        url=ext.uri if hasattr(ext, "uri") else "",
+                        title=ext.title if hasattr(ext, "title") else None,
+                        description=ext.description if hasattr(ext, "description") else None,
+                        thumbnail_url=None,
+                    )
+
+            # Expand facets to get full URLs in text (Bluesky truncates display URLs)
+            facets = getattr(response.value, "facets", None)
+            expanded_text = self._expand_facets_in_text(response.value.text, facets)
+
             return Post(
                 id=response.uri,
                 platform="bluesky",
-                text=response.value.text,
+                text=expanded_text,
                 created_at=datetime.fromisoformat(
                     response.value.created_at.replace("Z", "+00:00")
                 ),
                 url=self._uri_to_url(response.uri),
+                media_attachments=media_attachments,
+                link_embed=link_embed,
                 raw_data={"uri": response.uri, "cid": response.cid},
             )
 
@@ -209,10 +322,12 @@ class BlueskyPlugin(PlatformPlugin):
 
     def _feed_post_to_post(self, post: Any, is_repost: bool = False) -> Post:
         """Convert a Bluesky feed post to our Post model."""
-        # Parse media attachments if present
+        # Parse media attachments and link embeds if present
         media_attachments = []
+        link_embed = None
         if hasattr(post.record, "embed") and post.record.embed:
             embed = post.record.embed
+            # Check for image embeds
             if hasattr(embed, "images"):
                 for img in embed.images:
                     media_attachments.append(
@@ -222,6 +337,15 @@ class BlueskyPlugin(PlatformPlugin):
                             alt_text=img.alt if hasattr(img, "alt") else None,
                         )
                     )
+            # Check for external link embed (app.bsky.embed.external)
+            if hasattr(embed, "external"):
+                ext = embed.external
+                link_embed = LinkEmbed(
+                    url=ext.uri if hasattr(ext, "uri") else "",
+                    title=ext.title if hasattr(ext, "title") else None,
+                    description=ext.description if hasattr(ext, "description") else None,
+                    thumbnail_url=None,  # Bluesky stores as blob, not URL
+                )
 
         # Parse created_at
         created_at = post.record.created_at
@@ -233,13 +357,18 @@ class BlueskyPlugin(PlatformPlugin):
         if hasattr(post.record, "reply") and post.record.reply:
             reply_to_id = post.record.reply.parent.uri
 
+        # Expand facets to get full URLs in text (Bluesky truncates display URLs)
+        facets = getattr(post.record, "facets", None)
+        expanded_text = self._expand_facets_in_text(post.record.text, facets)
+
         return Post(
             id=post.uri,
             platform="bluesky",
-            text=post.record.text,
+            text=expanded_text,
             created_at=created_at,
             url=self._uri_to_url(post.uri),
             media_attachments=media_attachments,
+            link_embed=link_embed,
             reply_to_id=reply_to_id,
             is_repost=is_repost,
             language=post.record.langs[0] if hasattr(post.record, "langs") and post.record.langs else None,

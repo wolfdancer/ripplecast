@@ -1,14 +1,19 @@
 """Mastodon platform plugin."""
 
+import io
 import logging
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from mastodon import Mastodon, MastodonAPIError, MastodonUnauthorizedError
 
 from ripplecast.config import MastodonConfig
+
+if TYPE_CHECKING:
+    from ripplecast.media import DownloadedMedia
 from ripplecast.models import (
     AuthenticationError,
+    LinkEmbed,
     MediaAttachment,
     Post,
     PostNotFoundError,
@@ -128,6 +133,8 @@ class MastodonPlugin(PlatformPlugin):
         media: list[MediaAttachment] | None = None,
         reply_to_id: str | None = None,
         language: str | None = None,
+        link_embed: "LinkEmbed | None" = None,
+        downloaded_media: list["DownloadedMedia"] | None = None,
     ) -> Post:
         """Create a new post on Mastodon."""
         if not self._connected or not self._client:
@@ -139,11 +146,30 @@ class MastodonPlugin(PlatformPlugin):
             raise PostTooLongError(text, self.max_post_length, "mastodon")
 
         try:
-            # Note: Media upload not implemented in v1
+            # Upload media if provided
+            media_ids = None
+            if downloaded_media:
+                media_ids = []
+                for dm in downloaded_media[:4]:  # Mastodon max 4 attachments
+                    try:
+                        # Create a file-like object for the media data
+                        media_file = io.BytesIO(dm.data)
+                        media_dict = self._client.media_post(
+                            media_file=media_file,
+                            mime_type=dm.mime_type,
+                            description=dm.alt_text,
+                        )
+                        media_ids.append(media_dict["id"])
+                    except Exception as e:
+                        logger.warning(f"Failed to upload media: {e}")
+
+            # Note: Mastodon auto-generates link cards from URLs in text
+            # No special handling needed for link_embed
             status = self._client.status_post(
                 status=text,
                 in_reply_to_id=reply_to_id,
                 language=language,
+                media_ids=media_ids if media_ids else None,
             )
 
             return self._status_to_post(status)
@@ -206,6 +232,17 @@ class MastodonPlugin(PlatformPlugin):
                 )
             )
 
+        # Parse link embed (card) if present
+        link_embed = None
+        card = status.get("card")
+        if card:
+            link_embed = LinkEmbed(
+                url=card.get("url", ""),
+                title=card.get("title"),
+                description=card.get("description"),
+                thumbnail_url=card.get("image"),
+            )
+
         # Parse created_at
         created_at = status["created_at"]
         if isinstance(created_at, str):
@@ -218,6 +255,7 @@ class MastodonPlugin(PlatformPlugin):
             created_at=created_at,
             url=status["url"],
             media_attachments=media_attachments,
+            link_embed=link_embed,
             reply_to_id=status.get("in_reply_to_id"),
             is_repost=is_repost,
             original_post_id=str(original_id) if original_id else None,

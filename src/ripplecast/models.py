@@ -16,6 +16,17 @@ class MediaAttachment:
 
 
 @dataclass
+class LinkEmbed:
+    """Represents a link preview/card embedded in a post."""
+
+    url: str
+    title: str | None = None
+    description: str | None = None
+    thumbnail_url: str | None = None
+    thumbnail_data: bytes | None = field(default=None, repr=False)
+
+
+@dataclass
 class Post:
     """Normalized representation of a social media post across platforms."""
 
@@ -27,6 +38,7 @@ class Post:
 
     # Optional fields
     media_attachments: list[MediaAttachment] = field(default_factory=list)
+    link_embed: LinkEmbed | None = None
     reply_to_id: str | None = None
     is_repost: bool = False
     original_post_id: str | None = None
@@ -37,7 +49,7 @@ class Post:
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to a JSON-serializable dictionary."""
-        return {
+        result = {
             "id": self.id,
             "platform": self.platform,
             "text": self.text,
@@ -45,10 +57,19 @@ class Post:
             "url": self.url,
             "has_media": len(self.media_attachments) > 0,
             "media_count": len(self.media_attachments),
+            "has_link_embed": self.link_embed is not None,
             "is_reply": self.reply_to_id is not None,
             "is_repost": self.is_repost,
             "language": self.language,
         }
+        if self.link_embed:
+            result["link_embed"] = {
+                "url": self.link_embed.url,
+                "title": self.link_embed.title,
+                "description": self.link_embed.description,
+                "has_thumbnail": self.link_embed.thumbnail_url is not None,
+            }
+        return result
 
 
 @dataclass

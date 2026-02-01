@@ -1,6 +1,6 @@
-# CLAUDE.md - Ripplecast
+# CLAUDE.md
 
-This file provides guidance for Claude Code when working on this project.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Project Overview
 
@@ -13,35 +13,35 @@ This file provides guidance for Claude Code when working on this project.
 
 ## Quick Reference
 
+**Always use the virtual environment in `.venv`** when running Python scripts, tests, or tools.
+
 ### Running the Server
 
 ```bash
-# Development
-python -m ripplecast.server
+.venv/bin/python -m ripplecast.server
 
 # With MCP Inspector
-npx @modelcontextprotocol/inspector python -m ripplecast.server
+npx @modelcontextprotocol/inspector .venv/bin/python -m ripplecast.server
 ```
 
 ### Running Tests
 
 ```bash
-# All tests
-pytest tests/
+.venv/bin/pytest tests/
 
 # Specific test file
-pytest tests/test_matching.py -v
+.venv/bin/pytest tests/test_matching.py -v
 
 # With coverage
-pytest tests/ --cov=ripplecast
+.venv/bin/pytest tests/ --cov=ripplecast
 ```
 
 ### Code Formatting
 
 ```bash
-isort src/ripplecast/
-black src/ripplecast/
-mypy src/ripplecast/
+.venv/bin/isort src/ripplecast/
+.venv/bin/black src/ripplecast/
+.venv/bin/mypy src/ripplecast/
 ```
 
 ## Architecture Decisions
@@ -78,7 +78,9 @@ The sync history uses a simple JSON file because:
 | `platforms/mastodon.py` | Mastodon API integration |
 | `platforms/bluesky.py` | Bluesky AT Protocol integration |
 | `matching.py` | LLM-based post matching via sampling |
-| `models.py` | Shared data classes (Post, etc.) |
+| `models.py` | Shared data classes (Post, LinkEmbed, etc.) |
+| `media.py` | Async media download utilities for cross-posting |
+| `compatibility.py` | Cross-post compatibility analysis between platforms |
 
 ## Common Tasks
 
@@ -119,7 +121,7 @@ Use `unittest.mock` or `pytest-mock` to avoid real API calls:
 ```python
 @pytest.fixture
 def mock_mastodon(mocker):
-    mock = mocker.patch('crosspost_mcp.platforms.mastodon.Mastodon')
+    mock = mocker.patch('ripplecast.platforms.mastodon.Mastodon')
     mock.return_value.account_statuses.return_value = [...]
     return mock
 ```
@@ -176,6 +178,7 @@ Key libraries and their purposes:
 - Use App Password, not account password
 - Handle format is `username.bsky.social` (no @)
 - Posts have 300 char limit (shorter than Mastodon)
+- **Facets for rich text**: Bluesky truncates URLs for display but stores full URLs in `record.facets`. Use `_expand_facets_in_text()` to reconstruct full URLs for cross-posting to Mastodon (which needs full URLs to generate link cards)
 
 ### MCP
 

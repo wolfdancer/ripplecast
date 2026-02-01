@@ -28,6 +28,56 @@ logger = logging.getLogger(__name__)
 class BlueskyPlugin(PlatformPlugin):
     """Bluesky platform implementation."""
 
+    @staticmethod
+    def _expand_facets_in_text(text: str, facets: list[Any] | None) -> str:
+        """Expand truncated URLs in text using facet metadata.
+
+        Bluesky stores full URLs in facets while displaying truncated versions.
+        This method reconstructs the text with full URLs for cross-posting.
+
+        Args:
+            text: The original post text (may contain truncated URLs)
+            facets: List of facet objects with byte indices and features
+
+        Returns:
+            Text with truncated URLs replaced by their full versions
+        """
+        if not facets:
+            return text
+
+        # Convert text to bytes for proper offset handling
+        text_bytes = text.encode("utf-8")
+
+        # Collect all link facets with their byte ranges and URIs
+        replacements = []
+        for facet in facets:
+            if not hasattr(facet, "index") or not hasattr(facet, "features"):
+                continue
+
+            byte_start = facet.index.byte_start
+            byte_end = facet.index.byte_end
+
+            # Find link features in this facet
+            for feature in facet.features:
+                # Check for link type facet
+                if hasattr(feature, "uri"):
+                    uri = feature.uri
+                    replacements.append((byte_start, byte_end, uri))
+                    break  # Only one replacement per facet
+
+        if not replacements:
+            return text
+
+        # Sort replacements by byte_start in reverse order to avoid offset issues
+        replacements.sort(key=lambda x: x[0], reverse=True)
+
+        # Apply replacements from end to start
+        result_bytes = text_bytes
+        for byte_start, byte_end, uri in replacements:
+            result_bytes = result_bytes[:byte_start] + uri.encode("utf-8") + result_bytes[byte_end:]
+
+        return result_bytes.decode("utf-8")
+
     def __init__(self, config: BlueskyConfig):
         self._config = config
         self._client: Client | None = None
@@ -250,10 +300,14 @@ class BlueskyPlugin(PlatformPlugin):
                         thumbnail_url=None,
                     )
 
+            # Expand facets to get full URLs in text (Bluesky truncates display URLs)
+            facets = getattr(response.value, "facets", None)
+            expanded_text = self._expand_facets_in_text(response.value.text, facets)
+
             return Post(
                 id=response.uri,
                 platform="bluesky",
-                text=response.value.text,
+                text=expanded_text,
                 created_at=datetime.fromisoformat(
                     response.value.created_at.replace("Z", "+00:00")
                 ),
@@ -303,10 +357,14 @@ class BlueskyPlugin(PlatformPlugin):
         if hasattr(post.record, "reply") and post.record.reply:
             reply_to_id = post.record.reply.parent.uri
 
+        # Expand facets to get full URLs in text (Bluesky truncates display URLs)
+        facets = getattr(post.record, "facets", None)
+        expanded_text = self._expand_facets_in_text(post.record.text, facets)
+
         return Post(
             id=post.uri,
             platform="bluesky",
-            text=post.record.text,
+            text=expanded_text,
             created_at=created_at,
             url=self._uri_to_url(post.uri),
             media_attachments=media_attachments,

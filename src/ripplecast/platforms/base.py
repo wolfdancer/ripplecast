@@ -1,8 +1,12 @@
 """Abstract base class for platform plugins."""
 
 from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING
 
-from ripplecast.models import MediaAttachment, Post
+from ripplecast.models import LinkEmbed, MediaAttachment, Post
+
+if TYPE_CHECKING:
+    from ripplecast.media import DownloadedMedia
 
 
 class PlatformPlugin(ABC):
@@ -79,15 +83,19 @@ class PlatformPlugin(ABC):
         media: list[MediaAttachment] | None = None,
         reply_to_id: str | None = None,
         language: str | None = None,
+        link_embed: LinkEmbed | None = None,
+        downloaded_media: list["DownloadedMedia"] | None = None,
     ) -> Post:
         """
         Create a new post on this platform.
 
         Args:
             text: The post content
-            media: Optional media attachments
+            media: Optional media attachment metadata (for reference)
             reply_to_id: ID of post to reply to (if reply)
             language: ISO language code
+            link_embed: Optional link embed to attach
+            downloaded_media: Optional pre-downloaded media to upload
 
         Returns:
             The created Post object

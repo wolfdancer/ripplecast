@@ -8,14 +8,22 @@ import pytest
 class TestServerTools:
     """Tests for MCP server tool functions."""
 
+    @pytest.fixture
+    def mock_platform_manager(self):
+        """Create a mock platform manager that works with async context."""
+        async def make_manager():
+            manager = MagicMock()
+            return manager
+        return make_manager
+
     @pytest.mark.asyncio
     async def test_list_platforms(self):
         """Test list_platforms tool."""
         from ripplecast.server import list_platforms
 
         with patch("ripplecast.server.get_platform_manager") as mock_get_manager:
-            mock_manager = AsyncMock()
-            mock_manager.get_platform_status.return_value = [
+            mock_manager = MagicMock()
+            mock_manager.get_platform_status = AsyncMock(return_value=[
                 {
                     "name": "mastodon",
                     "display_name": "Mastodon",
@@ -28,7 +36,7 @@ class TestServerTools:
                     "connected": False,
                     "error": "Not authenticated",
                 },
-            ]
+            ])
             mock_get_manager.return_value = mock_manager
 
             result = await list_platforms()
@@ -50,9 +58,9 @@ class TestServerTools:
                 return_value={"username": "@test@mastodon.social"}
             )
 
-            mock_manager = AsyncMock()
+            mock_manager = MagicMock()
             mock_manager.get_platform.return_value = mock_plugin
-            mock_manager.get_posts.return_value = sample_mastodon_posts
+            mock_manager.get_posts = AsyncMock(return_value=sample_mastodon_posts)
             mock_get_manager.return_value = mock_manager
 
             result = await get_posts(platform="mastodon", limit=20)
@@ -70,7 +78,7 @@ class TestServerTools:
             mock_plugin = MagicMock()
             mock_plugin.connected = False
 
-            mock_manager = AsyncMock()
+            mock_manager = MagicMock()
             mock_manager.get_platform.return_value = mock_plugin
             mock_get_manager.return_value = mock_manager
 
@@ -93,6 +101,7 @@ class TestServerTools:
             # Target plugin
             mock_target = MagicMock()
             mock_target.connected = True
+            mock_target.max_post_length = 300
             mock_target.validate_post_content.return_value = (True, None)
             mock_target.create_post = AsyncMock(
                 return_value=MagicMock(
@@ -101,7 +110,7 @@ class TestServerTools:
                 )
             )
 
-            mock_manager = AsyncMock()
+            mock_manager = MagicMock()
             mock_manager.get_platform.side_effect = lambda p: (
                 mock_source if p == "mastodon" else mock_target
             )
@@ -138,7 +147,7 @@ class TestServerTools:
                 "Post exceeds 300 characters",
             )
 
-            mock_manager = AsyncMock()
+            mock_manager = MagicMock()
             mock_manager.get_platform.side_effect = lambda p: (
                 mock_source if p == "mastodon" else mock_target
             )
@@ -166,9 +175,10 @@ class TestServerTools:
 
             mock_target = MagicMock()
             mock_target.connected = True
+            mock_target.max_post_length = 300
             mock_target.validate_post_content.return_value = (True, None)
 
-            mock_manager = AsyncMock()
+            mock_manager = MagicMock()
             mock_manager.get_platform.side_effect = lambda p: (
                 mock_source if p == "mastodon" else mock_target
             )

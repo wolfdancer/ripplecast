@@ -7,9 +7,16 @@ from typing import Any
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.session import ServerSession
 
+from ripplecast.compatibility import (
+    CompatibilityLevel,
+    analyze_cross_post_compatibility,
+    generate_recommendations,
+)
 from ripplecast.matching import build_sync_summary, match_posts_with_llm
+from ripplecast.media import download_media, download_thumbnail
 from ripplecast.models import (
     AuthenticationError,
+    LinkEmbed,
     PlatformNotFoundError,
     PostNotFoundError,
     PostTooLongError,
@@ -110,7 +117,7 @@ async def get_posts(
 async def find_unsynced_posts(
     source_platform: str | None = None,
     days_back: int = 7,
-    ctx: Context[ServerSession, Any] = None,
+    ctx: Context[ServerSession, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Find posts that exist on one platform but not the other.
@@ -213,6 +220,8 @@ async def cross_post(
     post_id: str,
     target_platform: str,
     modify_text: str | None = None,
+    transfer_media: bool = True,
+    transfer_link_embed: bool = True,
 ) -> dict[str, Any]:
     """
     Cross-post a post from one platform to another.
@@ -223,13 +232,12 @@ async def cross_post(
         target_platform: Where to post it ("mastodon" or "bluesky")
         modify_text: Optional modified text (e.g., to fit character limit).
                     If not provided, uses original text.
+        transfer_media: Whether to transfer media attachments (default True)
+        transfer_link_embed: Whether to transfer link embeds (default True)
 
     Returns:
-        Result including new post ID and URL on target platform.
-        If post exceeds character limit, returns error with truncation suggestion.
-
-    Note:
-        Media attachments are NOT automatically transferred (v1 limitation)
+        Result including new post ID, URL, and what content was transferred.
+        If post has both media and link embed, returns error requiring choice.
     """
     manager = await get_platform_manager()
 
@@ -261,13 +269,33 @@ async def cross_post(
                 "message": f"Post {post_id} not found on {source_platform}",
             }
 
-        # Use modified text or original
+        # Analyze compatibility
+        report = analyze_cross_post_compatibility(
+            original_post, target_platform, target.max_post_length
+        )
+
+        # Check for media + embed conflict
+        if (
+            report.has_both_media_and_embed
+            and transfer_media
+            and transfer_link_embed
+        ):
+            return {
+                "success": False,
+                "error": "content_choice_required",
+                "message": "Post has both media and link embed. Bluesky only supports one.",
+                "suggestion": "Set transfer_media=False to transfer link embed, or transfer_link_embed=False to transfer media.",
+                "compatibility": report.to_dict(),
+            }
+
+        # Use modified text or original (or suggested truncation)
         text_to_post = modify_text if modify_text else original_post.text
+        if not modify_text and report.text_needs_truncation and report.suggested_text:
+            text_to_post = report.suggested_text
 
         # Validate text length
         is_valid, error = target.validate_post_content(text_to_post)
         if not is_valid:
-            # Suggest truncation
             max_len = target.max_post_length
             suggested = text_to_post[: max_len - 3] + "..." if len(text_to_post) > max_len else text_to_post
 
@@ -280,10 +308,38 @@ async def cross_post(
                 "suggestion": "Use modify_text parameter with shortened version",
             }
 
+        # Download and prepare media
+        downloaded_media = []
+        if transfer_media and original_post.media_attachments and report.can_transfer_media:
+            for attachment in original_post.media_attachments[:4]:
+                media = await download_media(attachment)
+                if media:
+                    downloaded_media.append(media)
+
+        # Prepare link embed
+        link_embed = None
+        if transfer_link_embed and original_post.link_embed and report.can_transfer_link_embed:
+            # Don't transfer link embed if we're transferring media (Bluesky limitation)
+            if not downloaded_media or target_platform == "mastodon":
+                link_embed = original_post.link_embed
+                # Download thumbnail if available
+                if link_embed.thumbnail_url:
+                    thumb_data = await download_thumbnail(link_embed.thumbnail_url)
+                    if thumb_data:
+                        link_embed = LinkEmbed(
+                            url=link_embed.url,
+                            title=link_embed.title,
+                            description=link_embed.description,
+                            thumbnail_url=link_embed.thumbnail_url,
+                            thumbnail_data=thumb_data,
+                        )
+
         # Create the post on target platform
         new_post = await target.create_post(
             text=text_to_post,
             language=original_post.language,
+            downloaded_media=downloaded_media if downloaded_media else None,
+            link_embed=link_embed,
         )
 
         return {
@@ -297,6 +353,12 @@ async def cross_post(
                 "platform": target_platform,
                 "post_id": new_post.id,
                 "url": new_post.url,
+            },
+            "transferred": {
+                "text": True,
+                "text_modified": modify_text is not None or report.text_needs_truncation,
+                "media_count": len(downloaded_media),
+                "link_embed": link_embed is not None,
             },
             "text_used": text_to_post,
             "synced_at": datetime.now(timezone.utc).isoformat(),
@@ -335,6 +397,8 @@ async def cross_post(
 async def bulk_cross_post(
     posts: list[dict[str, Any]],
     dry_run: bool = True,
+    transfer_media: bool = True,
+    transfer_link_embed: bool = True,
 ) -> dict[str, Any]:
     """
     Cross-post multiple posts at once.
@@ -347,9 +411,11 @@ async def bulk_cross_post(
                - modify_text: str | None (optional)
         dry_run: If True, only simulate and report what would happen.
                 If False, actually perform the cross-posts.
+        transfer_media: Whether to transfer media attachments (default True)
+        transfer_link_embed: Whether to transfer link embeds (default True)
 
     Returns:
-        Results for each post (success/failure/skipped)
+        Results for each post (success/failure/skipped) with compatibility info
 
     Note:
         ALWAYS run with dry_run=True first and show user the plan.
@@ -373,6 +439,11 @@ async def bulk_cross_post(
             )
             continue
 
+        # Type narrowing for mypy - we've verified these are not None
+        assert isinstance(source_platform, str)
+        assert isinstance(post_id, str)
+        assert isinstance(target_platform, str)
+
         if dry_run:
             # Just validate and report what would happen
             manager = await get_platform_manager()
@@ -391,18 +462,36 @@ async def bulk_cross_post(
                     )
                     continue
 
+                # Analyze compatibility
+                report = analyze_cross_post_compatibility(
+                    original, target_platform, target.max_post_length
+                )
+
                 text = modify_text or original.text
                 is_valid, error = target.validate_post_content(text)
+
+                # Check for conflicts
+                status = "would_succeed"
+                reason = error
+                if not is_valid:
+                    status = "would_fail"
+                elif report.level == CompatibilityLevel.REQUIRES_CHOICE:
+                    if transfer_media and transfer_link_embed:
+                        status = "would_fail"
+                        reason = "Has both media and embed - set transfer_media or transfer_link_embed to False"
 
                 results.append(
                     {
                         "index": i,
-                        "status": "would_succeed" if is_valid else "would_fail",
+                        "status": status,
                         "source_platform": source_platform,
                         "target_platform": target_platform,
                         "text_preview": text[:100] + "..." if len(text) > 100 else text,
                         "text_length": len(text),
-                        "reason": error if not is_valid else None,
+                        "media_count": len(original.media_attachments),
+                        "has_link_embed": original.link_embed is not None,
+                        "compatibility": report.to_dict(),
+                        "reason": reason,
                     }
                 )
 
@@ -421,6 +510,8 @@ async def bulk_cross_post(
                 post_id=post_id,
                 target_platform=target_platform,
                 modify_text=modify_text,
+                transfer_media=transfer_media,
+                transfer_link_embed=transfer_link_embed,
             )
 
             results.append(
@@ -455,10 +546,88 @@ async def bulk_cross_post(
 
 
 @mcp.tool()
+async def analyze_post_compatibility(
+    source_platform: str,
+    post_id: str,
+    target_platform: str,
+) -> dict[str, Any]:
+    """
+    Analyze whether a post can be cross-posted and what content can be transferred.
+
+    Use this before cross_post to understand what will happen.
+
+    Args:
+        source_platform: Platform where the post exists ("mastodon" or "bluesky")
+        post_id: ID of the post to analyze
+        target_platform: Platform to potentially cross-post to
+
+    Returns:
+        Detailed compatibility report including:
+        - Overall compatibility level (full, partial, text_only, requires_choice)
+        - What can/cannot be transferred
+        - Specific issues and warnings
+        - Recommendations for how to proceed
+    """
+    manager = await get_platform_manager()
+
+    try:
+        source = manager.get_platform(source_platform)
+        target = manager.get_platform(target_platform)
+
+        if not source.connected:
+            return {
+                "success": False,
+                "error": "source_not_connected",
+                "message": f"Not connected to {source_platform}",
+            }
+
+        original = await source.get_post_by_id(post_id)
+        if not original:
+            return {
+                "success": False,
+                "error": "post_not_found",
+                "message": f"Post {post_id} not found on {source_platform}",
+            }
+
+        report = analyze_cross_post_compatibility(
+            original, target_platform, target.max_post_length
+        )
+
+        recommendations = generate_recommendations(report)
+
+        return {
+            "success": True,
+            "post": original.to_dict(),
+            "compatibility": report.to_dict(),
+            "recommendations": recommendations,
+        }
+
+    except PlatformNotFoundError as e:
+        return {
+            "success": False,
+            "error": "platform_not_found",
+            "message": str(e),
+        }
+    except PostNotFoundError as e:
+        return {
+            "success": False,
+            "error": "post_not_found",
+            "message": str(e),
+        }
+    except Exception as e:
+        logger.error(f"Error analyzing compatibility: {e}")
+        return {
+            "success": False,
+            "error": "analysis_error",
+            "message": str(e),
+        }
+
+
+@mcp.tool()
 async def get_sync_status(
     platform: str,
     post_id: str,
-    ctx: Context[ServerSession, Any] = None,
+    ctx: Context[ServerSession, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Check if a post exists on other platforms (i.e., has been synced).

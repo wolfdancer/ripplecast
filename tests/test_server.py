@@ -11,40 +11,46 @@ class TestServerTools:
     @pytest.fixture
     def mock_platform_manager(self):
         """Create a mock platform manager that works with async context."""
+
         async def make_manager():
             manager = MagicMock()
             return manager
+
         return make_manager
 
     @pytest.mark.asyncio
-    async def test_list_platforms(self):
-        """Test list_platforms tool."""
-        from ripplecast.server import list_platforms
+    async def test_list_accounts(self):
+        """Test list_accounts tool."""
+        from ripplecast.server import list_accounts
 
         with patch("ripplecast.server.get_platform_manager") as mock_get_manager:
             mock_manager = MagicMock()
-            mock_manager.get_platform_status = AsyncMock(return_value=[
-                {
-                    "name": "mastodon",
-                    "display_name": "Mastodon",
-                    "connected": True,
-                    "username": "@test@mastodon.social",
-                },
-                {
-                    "name": "bluesky",
-                    "display_name": "Bluesky",
-                    "connected": False,
-                    "error": "Not authenticated",
-                },
-            ])
+            mock_manager.get_account_status = AsyncMock(
+                return_value=[
+                    {
+                        "name": "test-mastodon",
+                        "platform": "mastodon",
+                        "display_name": "Mastodon",
+                        "connected": True,
+                        "username": "@test@mastodon.social",
+                    },
+                    {
+                        "name": "test-bluesky",
+                        "platform": "bluesky",
+                        "display_name": "Bluesky",
+                        "connected": False,
+                        "error": "Not authenticated",
+                    },
+                ]
+            )
             mock_get_manager.return_value = mock_manager
 
-            result = await list_platforms()
+            result = await list_accounts()
 
-            assert "platforms" in result
-            assert len(result["platforms"]) == 2
-            assert result["platforms"][0]["name"] == "mastodon"
-            assert result["platforms"][0]["connected"] is True
+            assert "accounts" in result
+            assert len(result["accounts"]) == 2
+            assert result["accounts"][0]["name"] == "test-mastodon"
+            assert result["accounts"][0]["connected"] is True
 
     @pytest.mark.asyncio
     async def test_get_posts_success(self, sample_mastodon_posts):
@@ -59,19 +65,21 @@ class TestServerTools:
             )
 
             mock_manager = MagicMock()
-            mock_manager.get_platform.return_value = mock_plugin
+            mock_manager.get_account.return_value = mock_plugin
+            mock_manager.get_account_platform.return_value = "mastodon"
             mock_manager.get_posts = AsyncMock(return_value=sample_mastodon_posts)
             mock_get_manager.return_value = mock_manager
 
-            result = await get_posts(platform="mastodon", limit=20)
+            result = await get_posts(account="test-mastodon", limit=20)
 
             assert result["success"] is True
+            assert result["account"] == "test-mastodon"
             assert result["platform"] == "mastodon"
             assert result["post_count"] == 3
 
     @pytest.mark.asyncio
     async def test_get_posts_not_connected(self):
-        """Test get_posts when platform is not connected."""
+        """Test get_posts when account is not connected."""
         from ripplecast.server import get_posts
 
         with patch("ripplecast.server.get_platform_manager") as mock_get_manager:
@@ -79,13 +87,14 @@ class TestServerTools:
             mock_plugin.connected = False
 
             mock_manager = MagicMock()
-            mock_manager.get_platform.return_value = mock_plugin
+            mock_manager.get_account.return_value = mock_plugin
+            mock_manager.get_account_platform.return_value = "mastodon"
             mock_get_manager.return_value = mock_manager
 
-            result = await get_posts(platform="mastodon")
+            result = await get_posts(account="test-mastodon")
 
             assert result["success"] is False
-            assert result["error"] == "platform_not_connected"
+            assert result["error"] == "account_not_connected"
 
     @pytest.mark.asyncio
     async def test_cross_post_success(self, sample_mastodon_post):
@@ -111,20 +120,23 @@ class TestServerTools:
             )
 
             mock_manager = MagicMock()
-            mock_manager.get_platform.side_effect = lambda p: (
-                mock_source if p == "mastodon" else mock_target
+            mock_manager.get_account.side_effect = lambda a: (
+                mock_source if a == "test-mastodon" else mock_target
+            )
+            mock_manager.get_account_platform.side_effect = lambda a: (
+                "mastodon" if a == "test-mastodon" else "bluesky"
             )
             mock_get_manager.return_value = mock_manager
 
             result = await cross_post(
-                source_platform="mastodon",
+                source_account="test-mastodon",
                 post_id="123456789",
-                target_platform="bluesky",
+                target_account="test-bluesky",
             )
 
             assert result["success"] is True
-            assert result["source"]["platform"] == "mastodon"
-            assert result["target"]["platform"] == "bluesky"
+            assert result["source"]["account"] == "test-mastodon"
+            assert result["target"]["account"] == "test-bluesky"
 
     @pytest.mark.asyncio
     async def test_cross_post_text_too_long(self, sample_mastodon_post):
@@ -148,15 +160,18 @@ class TestServerTools:
             )
 
             mock_manager = MagicMock()
-            mock_manager.get_platform.side_effect = lambda p: (
-                mock_source if p == "mastodon" else mock_target
+            mock_manager.get_account.side_effect = lambda a: (
+                mock_source if a == "test-mastodon" else mock_target
+            )
+            mock_manager.get_account_platform.side_effect = lambda a: (
+                "mastodon" if a == "test-mastodon" else "bluesky"
             )
             mock_get_manager.return_value = mock_manager
 
             result = await cross_post(
-                source_platform="mastodon",
+                source_account="test-mastodon",
                 post_id="123456789",
-                target_platform="bluesky",
+                target_account="test-bluesky",
             )
 
             assert result["success"] is False
@@ -179,16 +194,19 @@ class TestServerTools:
             mock_target.validate_post_content.return_value = (True, None)
 
             mock_manager = MagicMock()
-            mock_manager.get_platform.side_effect = lambda p: (
-                mock_source if p == "mastodon" else mock_target
+            mock_manager.get_account.side_effect = lambda a: (
+                mock_source if a == "test-mastodon" else mock_target
+            )
+            mock_manager.get_account_platform.side_effect = lambda a: (
+                "mastodon" if a == "test-mastodon" else "bluesky"
             )
             mock_get_manager.return_value = mock_manager
 
             posts = [
                 {
-                    "source_platform": "mastodon",
+                    "source_account": "test-mastodon",
                     "post_id": "123",
-                    "target_platform": "bluesky",
+                    "target_account": "test-bluesky",
                 }
             ]
 

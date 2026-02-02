@@ -36,6 +36,9 @@ class Post:
     created_at: datetime
     url: str
 
+    # Account identifier (e.g., "personal-bluesky", "work-mastodon")
+    account: str | None = None
+
     # Optional fields
     media_attachments: list[MediaAttachment] = field(default_factory=list)
     link_embed: LinkEmbed | None = None
@@ -52,6 +55,7 @@ class Post:
         result = {
             "id": self.id,
             "platform": self.platform,
+            "account": self.account,
             "text": self.text,
             "created_at": self.created_at.isoformat(),
             "url": self.url,
@@ -118,6 +122,12 @@ class AuthenticationError(RipplecastError):
 
 class PlatformNotFoundError(RipplecastError):
     """Referenced platform is not configured."""
+
+    pass
+
+
+class AccountNotFoundError(RipplecastError):
+    """Referenced account is not configured."""
 
     pass
 

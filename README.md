@@ -35,9 +35,9 @@ An MCP (Model Context Protocol) server that enables cross-posting between Mastod
    pip install -e ".[dev]"
    ```
 
-3. Copy `.env.example` to `.env` and fill in your credentials:
+3. Copy `config.example.yaml` to `config.yaml` and fill in your credentials:
    ```bash
-   cp .env.example .env
+   cp config.example.yaml config.yaml
    ```
 
 4. Configure Claude Desktop (`~/Library/Application Support/Claude/claude_desktop_config.json`):
@@ -137,9 +137,9 @@ npx @modelcontextprotocol/inspector python -m ripplecast.server
 
 | Tool | Description |
 |------|-------------|
-| `list_platforms` | List configured platforms and connection status |
-| `get_posts` | Fetch recent posts from a platform |
-| `find_unsynced_posts` | Find posts missing from other platforms |
+| `list_accounts` | List configured accounts and connection status |
+| `get_posts` | Fetch recent posts from an account |
+| `find_unsynced_posts` | Find posts missing from other accounts |
 | `cross_post` | Cross-post a single post |
 | `bulk_cross_post` | Cross-post multiple posts (with dry-run) |
 | `get_sync_status` | Check if a specific post has been synced |

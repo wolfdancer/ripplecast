@@ -308,9 +308,7 @@ class BlueskyPlugin(PlatformPlugin):
                 id=response.uri,
                 platform="bluesky",
                 text=expanded_text,
-                created_at=datetime.fromisoformat(
-                    response.value.created_at.replace("Z", "+00:00")
-                ),
+                created_at=datetime.fromisoformat(response.value.created_at.replace("Z", "+00:00")),
                 url=self._uri_to_url(response.uri),
                 media_attachments=media_attachments,
                 link_embed=link_embed,
@@ -371,7 +369,11 @@ class BlueskyPlugin(PlatformPlugin):
             link_embed=link_embed,
             reply_to_id=reply_to_id,
             is_repost=is_repost,
-            language=post.record.langs[0] if hasattr(post.record, "langs") and post.record.langs else None,
+            language=(
+                post.record.langs[0]
+                if hasattr(post.record, "langs") and post.record.langs
+                else None
+            ),
             raw_data={"uri": post.uri, "cid": post.cid},
         )
 

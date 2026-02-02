@@ -166,10 +166,7 @@ class TestCompatibilityAnalysis:
         report = analyze_cross_post_compatibility(post, "mastodon")
 
         assert report.can_transfer_link_embed
-        assert any(
-            i.category == "embed" and "URL" in i.message
-            for i in report.issues
-        )
+        assert any(i.category == "embed" and "URL" in i.message for i in report.issues)
 
 
 class TestRecommendations:

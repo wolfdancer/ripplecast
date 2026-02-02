@@ -1,10 +1,12 @@
 """Configuration management for Ripplecast."""
 
-import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
-from dotenv import load_dotenv
+import yaml
+
+SUPPORTED_PLATFORMS = {"mastodon", "bluesky"}
 
 
 @dataclass
@@ -34,32 +36,138 @@ class BlueskyConfig:
 
 
 @dataclass
+class AccountConfig:
+    """Configuration for a single account."""
+
+    name: str  # Unique identifier (e.g., "personal-bluesky")
+    platform: str  # "bluesky" or "mastodon"
+    credentials: dict[str, Any] = field(default_factory=dict)
+    enabled: bool = True
+
+    def get_platform_config(self) -> MastodonConfig | BlueskyConfig:
+        """Convert credentials to platform-specific config object."""
+        if self.platform == "mastodon":
+            return MastodonConfig(
+                instance_url=self.credentials.get("instance-url", ""),
+                access_token=self.credentials.get("access-token", ""),
+            )
+        elif self.platform == "bluesky":
+            return BlueskyConfig(
+                handle=self.credentials.get("handle", ""),
+                app_password=self.credentials.get("app-password", ""),
+            )
+        else:
+            raise ValueError(f"Unknown platform: {self.platform}")
+
+
+@dataclass
+class Settings:
+    """Global application settings."""
+
+    log_level: str = "INFO"
+
+
+class ConfigurationError(Exception):
+    """Configuration file is invalid."""
+
+    pass
+
+
+@dataclass
 class Config:
     """Main configuration container."""
 
-    mastodon: MastodonConfig
-    bluesky: BlueskyConfig
+    accounts: list[AccountConfig] = field(default_factory=list)
+    settings: Settings = field(default_factory=Settings)
+
+    # Legacy single-account fields (for backward compatibility)
+    mastodon: MastodonConfig | None = None
+    bluesky: BlueskyConfig | None = None
     log_level: str = "INFO"
 
     @classmethod
-    def from_env(cls, env_path: Path | None = None) -> "Config":
-        """Load configuration from environment variables."""
-        if env_path:
-            load_dotenv(env_path)
+    def from_yaml(cls, yaml_path: Path | None = None) -> "Config":
+        """Load configuration from YAML file.
+
+        Search order:
+        1. Explicit path if provided
+        2. ./config.yaml (project root)
+        3. ~/.config/ripplecast/config.yaml
+        """
+        search_paths = []
+        if yaml_path:
+            search_paths.append(yaml_path)
         else:
-            load_dotenv()
+            search_paths.append(Path("config.yaml"))
+            search_paths.append(Path.home() / ".config" / "ripplecast" / "config.yaml")
+
+        config_path = None
+        for path in search_paths:
+            if path.exists():
+                config_path = path
+                break
+
+        if config_path is None:
+            raise FileNotFoundError("No config.yaml file found")
+
+        with open(config_path) as f:
+            data = yaml.safe_load(f)
+
+        if data is None:
+            raise ConfigurationError("Config file is empty")
+
+        # Parse settings
+        settings_data = data.get("settings", {})
+        settings = Settings(log_level=settings_data.get("log-level", "INFO"))
+
+        # Parse accounts
+        accounts_data = data.get("accounts", [])
+        if not accounts_data:
+            raise ConfigurationError("At least one account must be defined")
+
+        accounts = []
+        seen_names: set[str] = set()
+        for acc in accounts_data:
+            name = acc.get("name")
+            if not name:
+                raise ConfigurationError("Account name is required")
+            if name in seen_names:
+                raise ConfigurationError(f"Duplicate account name: {name}")
+            seen_names.add(name)
+
+            platform = acc.get("platform")
+            if platform not in SUPPORTED_PLATFORMS:
+                raise ConfigurationError(
+                    f"Unknown platform '{platform}' for account '{name}'. "
+                    f"Supported: {', '.join(SUPPORTED_PLATFORMS)}"
+                )
+
+            credentials = acc.get("credentials", {})
+            enabled = acc.get("enabled", True)
+
+            account = AccountConfig(
+                name=name,
+                platform=platform,
+                credentials=credentials,
+                enabled=enabled,
+            )
+
+            # Validate credentials
+            try:
+                platform_config = account.get_platform_config()
+                if not platform_config.is_configured:
+                    raise ConfigurationError(f"Missing credentials for account '{name}'")
+            except ValueError as e:
+                raise ConfigurationError(str(e)) from e
+
+            accounts.append(account)
 
         return cls(
-            mastodon=MastodonConfig(
-                instance_url=os.getenv("MASTODON_INSTANCE_URL", ""),
-                access_token=os.getenv("MASTODON_ACCESS_TOKEN", ""),
-            ),
-            bluesky=BlueskyConfig(
-                handle=os.getenv("BLUESKY_HANDLE", ""),
-                app_password=os.getenv("BLUESKY_APP_PASSWORD", ""),
-            ),
-            log_level=os.getenv("RIPPLECAST_LOG_LEVEL", "INFO"),
+            accounts=accounts,
+            settings=settings,
+            log_level=settings.log_level,
         )
+
 
 
 # Global config instance (lazy loaded)
@@ -70,12 +178,16 @@ def get_config() -> Config:
     """Get the global configuration instance."""
     global _config
     if _config is None:
-        _config = Config.from_env()
+        _config = Config.from_yaml()
     return _config
 
 
-def reload_config(env_path: Path | None = None) -> Config:
-    """Reload configuration from environment."""
+def reload_config(yaml_path: Path | None = None) -> Config:
+    """Reload configuration.
+
+    Args:
+        yaml_path: Path to YAML config file (optional)
+    """
     global _config
-    _config = Config.from_env(env_path)
+    _config = Config.from_yaml(yaml_path)
     return _config

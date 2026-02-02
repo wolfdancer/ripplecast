@@ -15,9 +15,9 @@ from ripplecast.compatibility import (
 from ripplecast.matching import build_sync_summary, match_posts_with_llm
 from ripplecast.media import download_media, download_thumbnail
 from ripplecast.models import (
+    AccountNotFoundError,
     AuthenticationError,
     LinkEmbed,
-    PlatformNotFoundError,
     PostNotFoundError,
     PostTooLongError,
 )
@@ -32,31 +32,31 @@ mcp = FastMCP("Ripplecast")
 
 
 @mcp.tool()
-async def list_platforms() -> dict[str, Any]:
+async def list_accounts() -> dict[str, Any]:
     """
-    List all configured social media platforms and their connection status.
+    List all configured social media accounts and their connection status.
 
-    Returns platform info including name, display name, connection status,
-    and authenticated username.
+    Returns account info including name, platform type, display name,
+    connection status, and authenticated username.
     """
     manager = await get_platform_manager()
-    statuses = await manager.get_platform_status()
+    statuses = await manager.get_account_status()
 
-    return {"platforms": statuses}
+    return {"accounts": statuses}
 
 
 @mcp.tool()
 async def get_posts(
-    platform: str,
+    account: str,
     limit: int = 20,
     exclude_replies: bool = True,
     exclude_reposts: bool = True,
 ) -> dict[str, Any]:
     """
-    Get recent posts from a platform.
+    Get recent posts from an account.
 
     Args:
-        platform: Platform name ("mastodon" or "bluesky")
+        account: Account name (e.g., "personal-bluesky", "work-mastodon")
         limit: Maximum posts to fetch (default 20, max 100)
         exclude_replies: Skip reply posts (default True)
         exclude_reposts: Skip reposts/boosts (default True)
@@ -67,18 +67,19 @@ async def get_posts(
     manager = await get_platform_manager()
 
     try:
-        plugin = manager.get_platform(platform)
+        plugin = manager.get_account(account)
+        platform = manager.get_account_platform(account)
 
         if not plugin.connected:
             return {
                 "success": False,
-                "error": "platform_not_connected",
-                "message": f"Not connected to {platform}",
+                "error": "account_not_connected",
+                "message": f"Not connected to account '{account}'",
             }
 
         user = await plugin.get_current_user()
         posts = await manager.get_posts(
-            platform=platform,
+            account=account,
             limit=min(limit, 100),
             exclude_replies=exclude_replies,
             exclude_reposts=exclude_reposts,
@@ -86,16 +87,17 @@ async def get_posts(
 
         return {
             "success": True,
+            "account": account,
             "platform": platform,
             "username": user.get("username"),
             "post_count": len(posts),
             "posts": [p.to_dict() for p in posts],
         }
 
-    except PlatformNotFoundError as e:
+    except AccountNotFoundError as e:
         return {
             "success": False,
-            "error": "platform_not_found",
+            "error": "account_not_found",
             "message": str(e),
         }
     except AuthenticationError as e:
@@ -105,7 +107,7 @@ async def get_posts(
             "message": str(e),
         }
     except Exception as e:
-        logger.error(f"Error fetching posts from {platform}: {e}")
+        logger.error(f"Error fetching posts from {account}: {e}")
         return {
             "success": False,
             "error": "fetch_error",
@@ -115,23 +117,23 @@ async def get_posts(
 
 @mcp.tool()
 async def find_unsynced_posts(
-    source_platform: str | None = None,
+    source_account: str | None = None,
     days_back: int = 7,
     ctx: Context[ServerSession, Any] | None = None,
 ) -> dict[str, Any]:
     """
-    Find posts that exist on one platform but not the other.
+    Find posts that exist on one account but not on others.
 
     Uses Claude (via MCP sampling) to intelligently match posts,
     handling variations in text, URLs, and formatting.
 
     Args:
-        source_platform: Only check posts from this platform (optional).
-                        If not specified, checks both directions.
+        source_account: Only check posts from this account (optional).
+                       If not specified, checks all accounts.
         days_back: How many days of posts to analyze (default 7)
 
     Returns:
-        Posts grouped by platform that are missing from other platforms,
+        Posts grouped by account that are missing from other accounts,
         including any partial matches found
     """
     if ctx is None:
@@ -148,33 +150,41 @@ async def find_unsynced_posts(
         end_date = datetime.now(timezone.utc)
         start_date = end_date - timedelta(days=days_back)
 
-        # Fetch posts from both platforms
+        # Fetch posts from all accounts
         all_posts = await manager.get_all_posts(
             limit=50,  # Reasonable batch for comparison
             exclude_replies=True,
             exclude_reposts=True,
         )
 
-        mastodon_posts = all_posts.get("mastodon", [])
-        bluesky_posts = all_posts.get("bluesky", [])
+        # Separate posts by platform type for matching
+        mastodon_posts = []
+        bluesky_posts = []
+        account_map: dict[str, str] = {}  # post_id -> account_name
 
-        # Filter by date range
-        mastodon_posts = [p for p in mastodon_posts if p.created_at >= start_date]
-        bluesky_posts = [p for p in bluesky_posts if p.created_at >= start_date]
+        for account_name, posts in all_posts.items():
+            platform = manager.get_account_platform(account_name)
+            for post in posts:
+                if post.created_at >= start_date:
+                    if platform == "mastodon":
+                        mastodon_posts.append(post)
+                    elif platform == "bluesky":
+                        bluesky_posts.append(post)
+                    account_map[post.id] = account_name
 
         if not mastodon_posts and not bluesky_posts:
             return {
                 "success": True,
                 "message": f"No posts found in the last {days_back} days",
-                "unsynced": {"mastodon_only": [], "bluesky_only": []},
+                "unsynced": {},
                 "summary": {
-                    "mastodon_only_count": 0,
-                    "bluesky_only_count": 0,
+                    "total_posts": 0,
+                    "unsynced_count": 0,
                     "synced_count": 0,
                 },
             }
 
-        # Use LLM to match posts
+        # Use LLM to match posts between platforms
         matches = await match_posts_with_llm(
             mastodon_posts,
             bluesky_posts,
@@ -186,13 +196,21 @@ async def find_unsynced_posts(
         # Build sync summary
         summary = build_sync_summary(mastodon_posts, bluesky_posts, matches)
 
-        # Filter by source platform if specified
-        if source_platform == "mastodon":
-            summary["bluesky_only"] = []
-            summary["summary"]["bluesky_only_count"] = 0
-        elif source_platform == "bluesky":
-            summary["mastodon_only"] = []
-            summary["summary"]["mastodon_only_count"] = 0
+        # Filter by source account if specified
+        if source_account:
+            source_platform = manager.get_account_platform(source_account)
+            if source_platform == "mastodon":
+                summary["bluesky_only"] = []
+                summary["summary"]["bluesky_only_count"] = 0
+            elif source_platform == "bluesky":
+                summary["mastodon_only"] = []
+                summary["summary"]["mastodon_only_count"] = 0
+
+        # Annotate posts with their account names
+        for post_dict in summary.get("mastodon_only", []):
+            post_dict["account"] = account_map.get(post_dict.get("id", ""), "unknown")
+        for post_dict in summary.get("bluesky_only", []):
+            post_dict["account"] = account_map.get(post_dict.get("id", ""), "unknown")
 
         return {
             "success": True,
@@ -216,20 +234,20 @@ async def find_unsynced_posts(
 
 @mcp.tool()
 async def cross_post(
-    source_platform: str,
+    source_account: str,
     post_id: str,
-    target_platform: str,
+    target_account: str,
     modify_text: str | None = None,
     transfer_media: bool = True,
     transfer_link_embed: bool = True,
 ) -> dict[str, Any]:
     """
-    Cross-post a post from one platform to another.
+    Cross-post a post from one account to another.
 
     Args:
-        source_platform: Where the original post exists ("mastodon" or "bluesky")
+        source_account: Account where the original post exists (e.g., "personal-mastodon")
         post_id: ID of the post to cross-post
-        target_platform: Where to post it ("mastodon" or "bluesky")
+        target_account: Account to post to (e.g., "personal-bluesky")
         modify_text: Optional modified text (e.g., to fit character limit).
                     If not provided, uses original text.
         transfer_media: Whether to transfer media attachments (default True)
@@ -242,22 +260,23 @@ async def cross_post(
     manager = await get_platform_manager()
 
     try:
-        # Get the source post
-        source = manager.get_platform(source_platform)
-        target = manager.get_platform(target_platform)
+        # Get the source and target plugins
+        source = manager.get_account(source_account)
+        target = manager.get_account(target_account)
+        target_platform = manager.get_account_platform(target_account)
 
         if not source.connected:
             return {
                 "success": False,
                 "error": "source_not_connected",
-                "message": f"Not connected to {source_platform}",
+                "message": f"Not connected to account '{source_account}'",
             }
 
         if not target.connected:
             return {
                 "success": False,
                 "error": "target_not_connected",
-                "message": f"Not connected to {target_platform}",
+                "message": f"Not connected to account '{target_account}'",
             }
 
         # Fetch the original post
@@ -266,7 +285,7 @@ async def cross_post(
             return {
                 "success": False,
                 "error": "post_not_found",
-                "message": f"Post {post_id} not found on {source_platform}",
+                "message": f"Post {post_id} not found on account '{source_account}'",
             }
 
         # Analyze compatibility
@@ -275,11 +294,7 @@ async def cross_post(
         )
 
         # Check for media + embed conflict
-        if (
-            report.has_both_media_and_embed
-            and transfer_media
-            and transfer_link_embed
-        ):
+        if report.has_both_media_and_embed and transfer_media and transfer_link_embed:
             return {
                 "success": False,
                 "error": "content_choice_required",
@@ -297,7 +312,9 @@ async def cross_post(
         is_valid, error = target.validate_post_content(text_to_post)
         if not is_valid:
             max_len = target.max_post_length
-            suggested = text_to_post[: max_len - 3] + "..." if len(text_to_post) > max_len else text_to_post
+            suggested = (
+                text_to_post[: max_len - 3] + "..." if len(text_to_post) > max_len else text_to_post
+            )
 
             return {
                 "success": False,
@@ -334,7 +351,7 @@ async def cross_post(
                             thumbnail_data=thumb_data,
                         )
 
-        # Create the post on target platform
+        # Create the post on target account
         new_post = await target.create_post(
             text=text_to_post,
             language=original_post.language,
@@ -345,11 +362,12 @@ async def cross_post(
         return {
             "success": True,
             "source": {
-                "platform": source_platform,
+                "account": source_account,
                 "post_id": post_id,
                 "url": original_post.url,
             },
             "target": {
+                "account": target_account,
                 "platform": target_platform,
                 "post_id": new_post.id,
                 "url": new_post.url,
@@ -378,10 +396,10 @@ async def cross_post(
             "limit": e.limit,
             "length": e.length,
         }
-    except PlatformNotFoundError as e:
+    except AccountNotFoundError as e:
         return {
             "success": False,
-            "error": "platform_not_found",
+            "error": "account_not_found",
             "message": str(e),
         }
     except Exception as e:
@@ -405,9 +423,9 @@ async def bulk_cross_post(
 
     Args:
         posts: List of dicts with keys:
-               - source_platform: str
+               - source_account: str (account name, e.g., "personal-mastodon")
                - post_id: str
-               - target_platform: str
+               - target_account: str (account name, e.g., "personal-bluesky")
                - modify_text: str | None (optional)
         dry_run: If True, only simulate and report what would happen.
                 If False, actually perform the cross-posts.
@@ -424,12 +442,12 @@ async def bulk_cross_post(
     results: list[dict[str, Any]] = []
 
     for i, post_spec in enumerate(posts):
-        source_platform = post_spec.get("source_platform")
+        source_account = post_spec.get("source_account")
         post_id = post_spec.get("post_id")
-        target_platform = post_spec.get("target_platform")
+        target_account = post_spec.get("target_account")
         modify_text = post_spec.get("modify_text")
 
-        if not all([source_platform, post_id, target_platform]):
+        if not all([source_account, post_id, target_account]):
             results.append(
                 {
                     "index": i,
@@ -440,16 +458,17 @@ async def bulk_cross_post(
             continue
 
         # Type narrowing for mypy - we've verified these are not None
-        assert isinstance(source_platform, str)
+        assert isinstance(source_account, str)
         assert isinstance(post_id, str)
-        assert isinstance(target_platform, str)
+        assert isinstance(target_account, str)
 
         if dry_run:
             # Just validate and report what would happen
             manager = await get_platform_manager()
             try:
-                source = manager.get_platform(source_platform)
-                target = manager.get_platform(target_platform)
+                source = manager.get_account(source_account)
+                target = manager.get_account(target_account)
+                target_platform = manager.get_account_platform(target_account)
 
                 original = await source.get_post_by_id(post_id)
                 if not original:
@@ -484,7 +503,8 @@ async def bulk_cross_post(
                     {
                         "index": i,
                         "status": status,
-                        "source_platform": source_platform,
+                        "source_account": source_account,
+                        "target_account": target_account,
                         "target_platform": target_platform,
                         "text_preview": text[:100] + "..." if len(text) > 100 else text,
                         "text_length": len(text),
@@ -506,9 +526,9 @@ async def bulk_cross_post(
         else:
             # Actually perform the cross-post
             result = await cross_post(
-                source_platform=source_platform,
+                source_account=source_account,
                 post_id=post_id,
-                target_platform=target_platform,
+                target_account=target_account,
                 modify_text=modify_text,
                 transfer_media=transfer_media,
                 transfer_link_embed=transfer_link_embed,
@@ -522,16 +542,8 @@ async def bulk_cross_post(
                 }
             )
 
-    success_count = sum(
-        1
-        for r in results
-        if r["status"] in ("success", "would_succeed")
-    )
-    fail_count = sum(
-        1
-        for r in results
-        if r["status"] in ("failed", "would_fail")
-    )
+    success_count = sum(1 for r in results if r["status"] in ("success", "would_succeed"))
+    fail_count = sum(1 for r in results if r["status"] in ("failed", "would_fail"))
 
     return {
         "dry_run": dry_run,
@@ -539,17 +551,19 @@ async def bulk_cross_post(
         "success_count": success_count,
         "fail_count": fail_count,
         "results": results,
-        "message": "This is a dry run - no posts were created"
-        if dry_run
-        else f"Completed: {success_count} succeeded, {fail_count} failed",
+        "message": (
+            "This is a dry run - no posts were created"
+            if dry_run
+            else f"Completed: {success_count} succeeded, {fail_count} failed"
+        ),
     }
 
 
 @mcp.tool()
 async def analyze_post_compatibility(
-    source_platform: str,
+    source_account: str,
     post_id: str,
-    target_platform: str,
+    target_account: str,
 ) -> dict[str, Any]:
     """
     Analyze whether a post can be cross-posted and what content can be transferred.
@@ -557,9 +571,9 @@ async def analyze_post_compatibility(
     Use this before cross_post to understand what will happen.
 
     Args:
-        source_platform: Platform where the post exists ("mastodon" or "bluesky")
+        source_account: Account where the post exists (e.g., "personal-mastodon")
         post_id: ID of the post to analyze
-        target_platform: Platform to potentially cross-post to
+        target_account: Account to potentially cross-post to (e.g., "personal-bluesky")
 
     Returns:
         Detailed compatibility report including:
@@ -571,14 +585,15 @@ async def analyze_post_compatibility(
     manager = await get_platform_manager()
 
     try:
-        source = manager.get_platform(source_platform)
-        target = manager.get_platform(target_platform)
+        source = manager.get_account(source_account)
+        target = manager.get_account(target_account)
+        target_platform = manager.get_account_platform(target_account)
 
         if not source.connected:
             return {
                 "success": False,
                 "error": "source_not_connected",
-                "message": f"Not connected to {source_platform}",
+                "message": f"Not connected to account '{source_account}'",
             }
 
         original = await source.get_post_by_id(post_id)
@@ -586,26 +601,27 @@ async def analyze_post_compatibility(
             return {
                 "success": False,
                 "error": "post_not_found",
-                "message": f"Post {post_id} not found on {source_platform}",
+                "message": f"Post {post_id} not found on account '{source_account}'",
             }
 
-        report = analyze_cross_post_compatibility(
-            original, target_platform, target.max_post_length
-        )
+        report = analyze_cross_post_compatibility(original, target_platform, target.max_post_length)
 
         recommendations = generate_recommendations(report)
 
         return {
             "success": True,
             "post": original.to_dict(),
+            "source_account": source_account,
+            "target_account": target_account,
+            "target_platform": target_platform,
             "compatibility": report.to_dict(),
             "recommendations": recommendations,
         }
 
-    except PlatformNotFoundError as e:
+    except AccountNotFoundError as e:
         return {
             "success": False,
-            "error": "platform_not_found",
+            "error": "account_not_found",
             "message": str(e),
         }
     except PostNotFoundError as e:
@@ -625,31 +641,33 @@ async def analyze_post_compatibility(
 
 @mcp.tool()
 async def get_sync_status(
-    platform: str,
+    account: str,
     post_id: str,
     ctx: Context[ServerSession, Any] | None = None,
 ) -> dict[str, Any]:
     """
-    Check if a post exists on other platforms (i.e., has been synced).
+    Check if a post exists on other accounts (i.e., has been synced).
 
     Uses content matching to find the same post across platforms.
 
     Args:
-        platform: Platform where the post exists ("mastodon" or "bluesky")
+        account: Account where the post exists (e.g., "personal-mastodon")
         post_id: ID of the post to check
 
     Returns:
-        Status showing which platforms have matching posts
+        Status showing which accounts have matching posts
     """
     manager = await get_platform_manager()
 
     try:
-        source = manager.get_platform(platform)
+        source = manager.get_account(account)
+        source_platform = manager.get_account_platform(account)
+
         if not source.connected:
             return {
                 "success": False,
-                "error": "platform_not_connected",
-                "message": f"Not connected to {platform}",
+                "error": "account_not_connected",
+                "message": f"Not connected to account '{account}'",
             }
 
         # Get the source post
@@ -658,20 +676,31 @@ async def get_sync_status(
             return {
                 "success": False,
                 "error": "post_not_found",
-                "message": f"Post {post_id} not found on {platform}",
+                "message": f"Post {post_id} not found on account '{account}'",
             }
-
-        # Determine target platform
-        target_platform = "bluesky" if platform == "mastodon" else "mastodon"
-        target = manager.get_platform(target_platform)
 
         synced_to = []
         not_synced_to = []
 
-        if target.connected and ctx:
-            # Get recent posts from target platform
+        # Check all other accounts
+        all_accounts = manager.get_all_accounts()
+        for target_name, target_plugin in all_accounts.items():
+            if target_name == account:
+                continue  # Skip the source account
+
+            target_platform = manager.get_account_platform(target_name)
+
+            if not target_plugin.connected:
+                not_synced_to.append(f"{target_name} (not connected)")
+                continue
+
+            if not ctx:
+                not_synced_to.append(f"{target_name} (context required for matching)")
+                continue
+
+            # Get recent posts from target account
             target_posts = await manager.get_posts(
-                target_platform,
+                target_name,
                 limit=50,
                 exclude_replies=True,
                 exclude_reposts=True,
@@ -682,7 +711,7 @@ async def get_sync_status(
                 [post],
                 target_posts,
                 ctx,
-                platform_a=platform.title(),
+                platform_a=source_platform.title(),
                 platform_b=target_platform.title(),
             )
 
@@ -695,6 +724,7 @@ async def get_sync_status(
                     if matched_post:
                         synced_to.append(
                             {
+                                "account": target_name,
                                 "platform": target_platform,
                                 "post_id": matched_post.id,
                                 "url": matched_post.url,
@@ -703,14 +733,13 @@ async def get_sync_status(
                             }
                         )
             else:
-                not_synced_to.append(target_platform)
-        elif not target.connected:
-            not_synced_to.append(f"{target_platform} (not connected)")
+                not_synced_to.append(target_name)
 
         return {
             "success": True,
             "source": {
-                "platform": platform,
+                "account": account,
+                "platform": source_platform,
                 "post_id": post_id,
                 "text": post.text,
                 "created_at": post.created_at.isoformat(),
@@ -726,10 +755,10 @@ async def get_sync_status(
             "error": "post_not_found",
             "message": str(e),
         }
-    except PlatformNotFoundError as e:
+    except AccountNotFoundError as e:
         return {
             "success": False,
-            "error": "platform_not_found",
+            "error": "account_not_found",
             "message": str(e),
         }
     except Exception as e:

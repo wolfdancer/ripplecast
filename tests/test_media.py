@@ -165,6 +165,7 @@ class TestDownloadMedia:
 
         with patch("ripplecast.media.httpx.AsyncClient") as mock_client:
             import httpx
+
             mock_client.return_value.__aenter__.return_value.get = AsyncMock(
                 side_effect=httpx.HTTPStatusError(
                     "Not Found", request=MagicMock(), response=MagicMock()
@@ -185,6 +186,7 @@ class TestDownloadMedia:
 
         with patch("ripplecast.media.httpx.AsyncClient") as mock_client:
             import httpx
+
             mock_client.return_value.__aenter__.return_value.get = AsyncMock(
                 side_effect=httpx.RequestError("Connection failed")
             )

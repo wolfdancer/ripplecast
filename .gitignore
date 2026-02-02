@@ -210,3 +210,4 @@ __marimo__/
 sync_history.json
 config.yaml
 .DS_Store
+.claude/

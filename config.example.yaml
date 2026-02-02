@@ -1,0 +1,34 @@
+# Ripplecast Configuration
+# Copy to config.yaml and fill in your credentials
+#
+# Config file search order:
+# 1. ./config.yaml (project root)
+# 2. ~/.config/ripplecast/config.yaml
+
+settings:
+  log-level: INFO
+
+accounts:
+  # Bluesky account example
+  - name: personal-bluesky
+    platform: bluesky
+    enabled: true
+    credentials:
+      handle: yourhandle.bsky.social
+      app-password: xxxx-xxxx-xxxx-xxxx
+
+  # Mastodon account example
+  - name: work-mastodon
+    platform: mastodon
+    enabled: true
+    credentials:
+      instance-url: https://mastodon.social
+      access-token: your_access_token_here
+
+  # Additional account example (disabled)
+  - name: side-project
+    platform: mastodon
+    enabled: false
+    credentials:
+      instance-url: https://fosstodon.org
+      access-token: another_token_here

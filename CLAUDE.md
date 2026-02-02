@@ -102,7 +102,7 @@ async def my_new_tool(param: str) -> dict:
 1. Create `platforms/newplatform.py`
 2. Implement all abstract methods from `PlatformPlugin`
 3. Register in `platform_manager.py`
-4. Add environment variables to `.env.example`
+4. Add configuration to `config.example.yaml`
 5. Add tests in `tests/test_newplatform.py`
 
 ### Modifying Post Matching Logic
@@ -147,15 +147,27 @@ if not platform.connected:
     }
 ```
 
-## Environment Variables
+## Configuration
 
-Required for development:
-- `MASTODON_INSTANCE_URL`
-- `MASTODON_ACCESS_TOKEN`
-- `BLUESKY_HANDLE`
-- `BLUESKY_APP_PASSWORD`
+Copy `config.example.yaml` to `config.yaml` and fill in your credentials:
 
-Copy `.env.example` to `.env` and fill in your test credentials.
+```yaml
+settings:
+  log-level: INFO
+
+accounts:
+  - name: mastodon
+    platform: mastodon
+    credentials:
+      instance-url: https://mastodon.social
+      access-token: your_access_token_here
+
+  - name: bluesky
+    platform: bluesky
+    credentials:
+      handle: yourhandle.bsky.social
+      app-password: xxxx-xxxx-xxxx-xxxx
+```
 
 ## Dependencies
 
@@ -163,7 +175,7 @@ Key libraries and their purposes:
 - `mcp`: MCP SDK for server implementation
 - `Mastodon.py`: Mastodon API client
 - `atproto`: Bluesky AT Protocol client
-- `python-dotenv`: Environment variable loading
+- `pyyaml`: YAML configuration file parsing
 
 ## Gotchas
 

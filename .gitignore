@@ -208,4 +208,5 @@ __marimo__/
 
 # Ripplecast specific
 sync_history.json
+config.yaml
 .DS_Store

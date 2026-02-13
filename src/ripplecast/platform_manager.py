@@ -264,6 +264,7 @@ async def get_platform_manager() -> PlatformManager:
     """Get the global platform manager instance."""
     global _manager
     if _manager is None:
-        _manager = PlatformManager()
-        await _manager.initialize()
+        manager = PlatformManager()
+        await manager.initialize()
+        _manager = manager
     return _manager

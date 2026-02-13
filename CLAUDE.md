@@ -149,7 +149,18 @@ if not platform.connected:
 
 ## Configuration
 
-Copy `config.example.yaml` to `config.yaml` and fill in your credentials:
+Copy `config.example.yaml` to `~/.config/ripplecast/config.yaml` and fill in your credentials.
+
+The server searches for config in this order:
+1. `./config.yaml` (current working directory)
+2. `~/.config/ripplecast/config.yaml`
+
+**Important:** Claude Desktop launches the server with a different working directory than the project root, so `./config.yaml` won't be found. Always use `~/.config/ripplecast/config.yaml` for reliable operation.
+
+```bash
+mkdir -p ~/.config/ripplecast
+cp config.example.yaml ~/.config/ripplecast/config.yaml
+```
 
 ```yaml
 settings:

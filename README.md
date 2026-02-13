@@ -35,10 +35,12 @@ An MCP (Model Context Protocol) server that enables cross-posting between Mastod
    pip install -e ".[dev]"
    ```
 
-3. Copy `config.example.yaml` to `config.yaml` and fill in your credentials:
+3. Copy `config.example.yaml` to `~/.config/ripplecast/config.yaml` and fill in your credentials:
    ```bash
-   cp config.example.yaml config.yaml
+   mkdir -p ~/.config/ripplecast
+   cp config.example.yaml ~/.config/ripplecast/config.yaml
    ```
+   > **Note:** Claude Desktop launches the server with a different working directory, so a project-root `config.yaml` won't be found. Always use `~/.config/ripplecast/config.yaml`.
 
 4. Configure Claude Desktop (`~/Library/Application Support/Claude/claude_desktop_config.json`):
    ```json

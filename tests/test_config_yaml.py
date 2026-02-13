@@ -282,12 +282,14 @@ class TestGetConfig:
             os.chdir(original_cwd)
             ripplecast.config._config = None
 
-    def test_error_when_no_yaml(self, tmp_path):
+    def test_error_when_no_yaml(self, tmp_path, monkeypatch):
         """Test that FileNotFoundError is raised when no YAML exists."""
         # Change to empty directory (no config.yaml file)
         original_cwd = os.getcwd()
         try:
             os.chdir(tmp_path)
+            # Ensure ~/.config/ripplecast/config.yaml is not found either
+            monkeypatch.setattr(Path, "home", lambda: tmp_path / "fakehome")
 
             # Reset global config
             import ripplecast.config

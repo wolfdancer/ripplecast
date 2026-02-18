@@ -201,6 +201,14 @@ class MastodonPlugin(PlatformPlugin):
         except MastodonAPIError:
             raise PostNotFoundError(f"Post {post_id} not found on Mastodon")
 
+    def is_posted_via_ripplecast(self, post: Post) -> bool:
+        """Check Mastodon's application field for the ripplecast app name."""
+        application = post.raw_data.get("application")
+        if isinstance(application, dict):
+            app_name = application.get("name", "").lower()
+            return "ripplecast" in app_name
+        return False
+
     def _status_to_post(self, status: dict[str, Any]) -> Post:
         """Convert a Mastodon status to our Post model."""
         # Handle reblog (repost)

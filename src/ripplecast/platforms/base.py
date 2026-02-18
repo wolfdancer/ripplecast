@@ -132,3 +132,11 @@ class PlatformPlugin(ABC):
         if len(text) > self.max_post_length:
             return False, f"Post exceeds {self.max_post_length} characters (got {len(text)})"
         return True, None
+
+    @abstractmethod
+    def is_posted_via_ripplecast(self, post: Post) -> bool:
+        """
+        Check if a post's metadata indicates it was created via ripplecast.
+        Return False if the platform has no attribution mechanism.
+        """
+        pass

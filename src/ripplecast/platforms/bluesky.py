@@ -232,7 +232,15 @@ class BlueskyPlugin(PlatformPlugin):
                     external.thumb = thumb_response.blob
                 embed = models.AppBskyEmbedExternal.Main(external=external)
 
-            response = self._client.send_post(text=text, embed=embed)
+            record = models.AppBskyFeedPost.Record(
+                created_at=self._client.get_current_time_iso(),
+                text=text,
+                embed=embed,
+                via="ripplecast",
+            )
+            response = self._client.app.bsky.feed.post.create(
+                self._client.me.did, record
+            )
 
             # Return the created post
             return Post(
@@ -241,7 +249,7 @@ class BlueskyPlugin(PlatformPlugin):
                 text=text,
                 created_at=datetime.now(),
                 url=self._uri_to_url(response.uri),
-                raw_data={"uri": response.uri, "cid": response.cid},
+                raw_data={"uri": response.uri, "cid": response.cid, "via": "ripplecast"},
             )
 
         except AtProtocolError as e:
@@ -312,7 +320,7 @@ class BlueskyPlugin(PlatformPlugin):
                 url=self._uri_to_url(response.uri),
                 media_attachments=media_attachments,
                 link_embed=link_embed,
-                raw_data={"uri": response.uri, "cid": response.cid},
+                raw_data={"uri": response.uri, "cid": response.cid, "via": getattr(response.value, "via", None)},
             )
 
         except AtProtocolError:
@@ -374,8 +382,13 @@ class BlueskyPlugin(PlatformPlugin):
                 if hasattr(post.record, "langs") and post.record.langs
                 else None
             ),
-            raw_data={"uri": post.uri, "cid": post.cid},
+            raw_data={"uri": post.uri, "cid": post.cid, "via": getattr(post.record, "via", None)},
         )
+
+    def is_posted_via_ripplecast(self, post: Post) -> bool:
+        """Check for a 'via' field in raw_data populated when ripplecast creates posts."""
+        via = post.raw_data.get("via", "")
+        return isinstance(via, str) and "ripplecast" in via.lower()
 
     def _uri_to_url(self, uri: str) -> str:
         """Convert an AT Protocol URI to a bsky.app URL."""

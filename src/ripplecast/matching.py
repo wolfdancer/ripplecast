@@ -71,7 +71,6 @@ Only include matches with confidence >= 0.7. Consider:
 - Exact or near-exact text matches
 - Same content with minor edits (typos, length adjustments)
 - Same links or media references
-- Posted within similar timeframes
 
 If no matches found, return an empty array: []
 

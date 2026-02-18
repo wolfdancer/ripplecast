@@ -161,9 +161,11 @@ async def find_unsynced_posts(
         mastodon_posts = []
         bluesky_posts = []
         account_map: dict[str, str] = {}  # post_id -> account_name
+        plugin_map = {}  # post_id -> plugin (for Signal 2 checks)
 
         for account_name, posts in all_posts.items():
             platform = manager.get_account_platform(account_name)
+            plugin = manager.get_account(account_name)
             for post in posts:
                 if post.created_at >= start_date:
                     if platform == "mastodon":
@@ -171,6 +173,7 @@ async def find_unsynced_posts(
                     elif platform == "bluesky":
                         bluesky_posts.append(post)
                     account_map[post.id] = account_name
+                    plugin_map[post.id] = plugin
 
         if not mastodon_posts and not bluesky_posts:
             return {
@@ -196,6 +199,30 @@ async def find_unsynced_posts(
         # Build sync summary
         summary = build_sync_summary(mastodon_posts, bluesky_posts, matches)
 
+        # Signal 2: remove posts created via ripplecast from the unsynced lists
+        post_objects = {p.id: p for p in mastodon_posts + bluesky_posts}
+        ripplecast_synced = []
+
+        def _filter_via_ripplecast(post_dicts: list) -> list:
+            remaining = []
+            for post_dict in post_dicts:
+                post_id = post_dict.get("id", "")
+                post = post_objects.get(post_id)
+                plugin = plugin_map.get(post_id)
+                if post and plugin and plugin.is_posted_via_ripplecast(post):
+                    ripplecast_synced.append(
+                        {"post_id": post_id, "platform": post_dict.get("platform"), "match_type": "posted_via_ripplecast"}
+                    )
+                else:
+                    remaining.append(post_dict)
+            return remaining
+
+        summary["mastodon_only"] = _filter_via_ripplecast(summary["mastodon_only"])
+        summary["bluesky_only"] = _filter_via_ripplecast(summary["bluesky_only"])
+        summary["summary"]["mastodon_only_count"] = len(summary["mastodon_only"])
+        summary["summary"]["bluesky_only_count"] = len(summary["bluesky_only"])
+        summary["summary"]["synced_count"] += len(ripplecast_synced)
+
         # Filter by source account if specified
         if source_account:
             source_platform = manager.get_account_platform(source_account)
@@ -220,6 +247,7 @@ async def find_unsynced_posts(
                 "bluesky_only": summary["bluesky_only"],
             },
             "already_synced": summary["synced"],
+            "already_synced_via_ripplecast": ripplecast_synced,
             "summary": summary["summary"],
         }
 
@@ -639,6 +667,7 @@ async def analyze_post_compatibility(
         }
 
 
+
 @mcp.tool()
 async def get_sync_status(
     account: str,
@@ -694,11 +723,22 @@ async def get_sync_status(
                 not_synced_to.append(f"{target_name} (not connected)")
                 continue
 
+            # Signal 2: check ripplecast metadata first (precise, no LLM needed)
+            if source.is_posted_via_ripplecast(post):
+                synced_to.append(
+                    {
+                        "account": target_name,
+                        "platform": target_platform,
+                        "match_type": "posted_via_ripplecast",
+                    }
+                )
+                continue
+
             if not ctx:
                 not_synced_to.append(f"{target_name} (context required for matching)")
                 continue
 
-            # Get recent posts from target account
+            # Signal 1: fall back to LLM content matching
             target_posts = await manager.get_posts(
                 target_name,
                 limit=50,
@@ -706,7 +746,6 @@ async def get_sync_status(
                 exclude_reposts=True,
             )
 
-            # Use LLM to find matches
             matches = await match_posts_with_llm(
                 [post],
                 target_posts,

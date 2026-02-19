@@ -419,6 +419,133 @@ class TestFindUnsyncedPosts:
     """Tests for find_unsynced_posts tool — Signal 2 filtering."""
 
     @pytest.mark.asyncio
+    async def test_bluesky_ripplecast_post_removes_mastodon_original_from_unsynced(self):
+        """Mastodon original is not reported as unsynced when its Bluesky cross-post
+        is detected as a ripplecast post (even if the LLM did not match them)."""
+        from ripplecast.server import find_unsynced_posts
+
+        mastodon_post = Post(
+            id="masto-orig",
+            platform="mastodon",
+            account="test-mastodon",
+            text="Hello from Mastodon, cross-posted via ripplecast.",
+            created_at=datetime(2026, 2, 17, 10, 0, 0, tzinfo=timezone.utc),
+            url="https://mastodon.social/@testuser/masto-orig",
+        )
+        bluesky_post = Post(
+            id="at://did:plc:test/app.bsky.feed.post/bsky-rc",
+            platform="bluesky",
+            account="test-bluesky",
+            text="Hello from Mastodon, cross-posted via ripplecast.",
+            created_at=datetime(2026, 2, 17, 10, 1, 0, tzinfo=timezone.utc),
+            url="https://bsky.app/profile/test.bsky.social/post/bsky-rc",
+            raw_data={"uri": "at://did:plc:test/app.bsky.feed.post/bsky-rc", "cid": "cid1", "via": "ripplecast"},
+        )
+
+        mock_mastodon_plugin = MagicMock()
+        mock_mastodon_plugin.connected = True
+        mock_mastodon_plugin.is_posted_via_ripplecast = MagicMock(return_value=False)
+
+        mock_bluesky_plugin = MagicMock()
+        mock_bluesky_plugin.connected = True
+        mock_bluesky_plugin.is_posted_via_ripplecast = MagicMock(return_value=True)
+
+        mock_manager = MagicMock()
+        mock_manager.get_account_platform.side_effect = lambda a: (
+            "mastodon" if a == "test-mastodon" else "bluesky"
+        )
+        mock_manager.get_account.side_effect = lambda a: (
+            mock_mastodon_plugin if a == "test-mastodon" else mock_bluesky_plugin
+        )
+        mock_manager.get_all_posts = AsyncMock(
+            return_value={
+                "test-mastodon": [mastodon_post],
+                "test-bluesky": [bluesky_post],
+            }
+        )
+
+        mock_ctx = MagicMock()
+
+        with patch("ripplecast.server.get_platform_manager", return_value=mock_manager), patch(
+            "ripplecast.server.match_posts_with_llm", AsyncMock(return_value=[])
+        ):
+            result = await find_unsynced_posts(ctx=mock_ctx, days_back=30)
+
+        assert result["success"] is True
+        # The Mastodon original must not appear in any unsynced bucket
+        mastodon_only_ids = [p["id"] for p in result["unsynced"]["mastodon_only"]]
+        assert "masto-orig" not in mastodon_only_ids, (
+            "Mastodon original should not appear in mastodon_only when its "
+            "Bluesky counterpart is a ripplecast post"
+        )
+        # The Bluesky cross-post must be in already_synced_via_ripplecast
+        ripplecast_ids = [e["post_id"] for e in result["already_synced_via_ripplecast"]]
+        assert "at://did:plc:test/app.bsky.feed.post/bsky-rc" in ripplecast_ids
+        # Counts must be consistent
+        assert result["summary"]["mastodon_only_count"] == len(result["unsynced"]["mastodon_only"])
+
+    @pytest.mark.asyncio
+    async def test_bluesky_ripplecast_truncated_text_removes_mastodon_original(self):
+        """Mastodon original is removed from unsynced even when the Bluesky cross-post
+        text was truncated to fit the 300-character limit."""
+        from ripplecast.server import find_unsynced_posts
+
+        long_text = "A" * 297 + " end"  # 301 chars — over Bluesky's 300 limit
+        truncated_text = long_text[:297] + "..."  # suggested_text from compatibility
+
+        mastodon_post = Post(
+            id="masto-long",
+            platform="mastodon",
+            account="test-mastodon",
+            text=long_text,
+            created_at=datetime(2026, 2, 17, 10, 0, 0, tzinfo=timezone.utc),
+            url="https://mastodon.social/@testuser/masto-long",
+        )
+        bluesky_post = Post(
+            id="at://did:plc:test/app.bsky.feed.post/bsky-trunc",
+            platform="bluesky",
+            account="test-bluesky",
+            text=truncated_text,
+            created_at=datetime(2026, 2, 17, 10, 1, 0, tzinfo=timezone.utc),
+            url="https://bsky.app/profile/test.bsky.social/post/bsky-trunc",
+            raw_data={"uri": "at://...", "cid": "cid2", "via": "ripplecast"},
+        )
+
+        mock_mastodon_plugin = MagicMock()
+        mock_mastodon_plugin.connected = True
+        mock_mastodon_plugin.is_posted_via_ripplecast = MagicMock(return_value=False)
+
+        mock_bluesky_plugin = MagicMock()
+        mock_bluesky_plugin.connected = True
+        mock_bluesky_plugin.is_posted_via_ripplecast = MagicMock(return_value=True)
+
+        mock_manager = MagicMock()
+        mock_manager.get_account_platform.side_effect = lambda a: (
+            "mastodon" if a == "test-mastodon" else "bluesky"
+        )
+        mock_manager.get_account.side_effect = lambda a: (
+            mock_mastodon_plugin if a == "test-mastodon" else mock_bluesky_plugin
+        )
+        mock_manager.get_all_posts = AsyncMock(
+            return_value={
+                "test-mastodon": [mastodon_post],
+                "test-bluesky": [bluesky_post],
+            }
+        )
+
+        mock_ctx = MagicMock()
+
+        with patch("ripplecast.server.get_platform_manager", return_value=mock_manager), patch(
+            "ripplecast.server.match_posts_with_llm", AsyncMock(return_value=[])
+        ):
+            result = await find_unsynced_posts(ctx=mock_ctx, days_back=30)
+
+        assert result["success"] is True
+        mastodon_only_ids = [p["id"] for p in result["unsynced"]["mastodon_only"]]
+        assert "masto-long" not in mastodon_only_ids
+        assert result["summary"]["mastodon_only_count"] == len(result["unsynced"]["mastodon_only"])
+
+    @pytest.mark.asyncio
     async def test_signal2_removes_ripplecast_posts_from_unsynced(self):
         """Posts created via ripplecast are not reported as unsynced."""
         from ripplecast.server import find_unsynced_posts

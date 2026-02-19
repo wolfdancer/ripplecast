@@ -223,6 +223,38 @@ async def find_unsynced_posts(
         summary["summary"]["bluesky_only_count"] = len(summary["bluesky_only"])
         summary["summary"]["synced_count"] += len(ripplecast_synced)
 
+        # Reconcile: a Bluesky post tagged as ripplecast means a Mastodon post was
+        # its source. That Mastodon original must not appear in mastodon_only.
+        # The LLM may have missed the match, so we do text-based reconciliation here.
+        ripplecast_bsky_ids = {
+            e["post_id"] for e in ripplecast_synced if e.get("platform") == "bluesky"
+        }
+        if ripplecast_bsky_ids:
+            mastodon_ids_to_remove: set[str] = set()
+            for bsky_id in ripplecast_bsky_ids:
+                bsky_post = post_objects.get(bsky_id)
+                if bsky_post is None:
+                    continue
+                bsky_text = bsky_post.text.strip()
+                for mastodon_dict in summary["mastodon_only"]:
+                    masto_id = mastodon_dict.get("id", "")
+                    masto_post = post_objects.get(masto_id)
+                    if masto_post is None:
+                        continue
+                    masto_text = masto_post.text.strip()
+                    # Match exact text, or Bluesky was truncated with "..." suffix
+                    if masto_text == bsky_text or (
+                        bsky_text.endswith("...") and masto_text.startswith(bsky_text[:-3])
+                    ):
+                        mastodon_ids_to_remove.add(masto_id)
+                        break
+            if mastodon_ids_to_remove:
+                summary["mastodon_only"] = [
+                    p for p in summary["mastodon_only"]
+                    if p.get("id") not in mastodon_ids_to_remove
+                ]
+                summary["summary"]["mastodon_only_count"] = len(summary["mastodon_only"])
+
         # Filter by source account if specified
         if source_account:
             source_platform = manager.get_account_platform(source_account)
